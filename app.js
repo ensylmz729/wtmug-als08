@@ -1,16 +1,17 @@
 /* ============================================================
-   P2P Transfer — Ortak Uygulama Mantığı
-   - Sunucusuz WebRTC (yalnızca SDP takası için manuel QR akışı)
-   - Metin + Dosya (chunked) transferi
-   - WebRTC: DTLS ile uçtan uca şifreli
+   P2P Transfer — Otomatik Sinyalleşme (PeerJS)
+   - QR'a yalnızca kısa peer ID gömülür (~13 karakter)
+   - Telefon QR'ı okur okumaz P2P bağlantı kendiliğinden kurulur
+   - Veri: WebRTC DataChannel, DTLS ile uçtan uca şifreli
+   - Sinyal broker'ı yalnızca eşleştirme yapar; içerik akmaz
    ============================================================ */
 
 (() => {
   'use strict';
 
   const ROLE = document.body.dataset.role; // "desktop" | "mobile"
-  const CHUNK_SIZE = 16 * 1024;            // 16 KB güvenli parça boyutu
-  const HIGH_WATER = 1024 * 1024;          // 1 MB buffer sınırı
+  const CHUNK_SIZE = 16 * 1024;
+  const HIGH_WATER = 1024 * 1024;
 
   // ---- DOM ----
   const $ = (id) => document.getElementById(id);
@@ -27,18 +28,18 @@
   const progressPct = $('progressPct');
   const progressLabel = $('progressLabel');
 
-  // ---- WebRTC ----
-  let pc = null;
-  let dc = null;
+  // ---- PeerJS / WebRTC ----
+  let peer = null;
+  let conn = null;              // PeerJS DataConnection
   let dataChannelReady = false;
 
-  // Gelen dosya birleştirme durumu
-  const incomingFiles = new Map(); // id -> {name,size,mime,chunks:[],received}
+  const incomingFiles = new Map();
 
-  // ---- UI yardımcıları ----
+  // ---- UI ----
   function setStatus(text, kind = 'wait') {
     statusBadge.textContent = text;
-    statusBadge.className = 'badge ' + (kind === 'ok' ? 'badge-ok' : kind === 'err' ? 'badge-err' : 'badge-wait');
+    statusBadge.className = 'badge ' +
+      (kind === 'ok' ? 'badge-ok' : kind === 'err' ? 'badge-err' : 'badge-wait');
   }
 
   function showChat() {
@@ -66,23 +67,19 @@
   function addBlobMessage(blob, who, filename, mime) {
     const div = document.createElement('div');
     div.className = 'msg ' + (who === 'me' ? 'me' : 'them');
-
     const url = URL.createObjectURL(blob);
+
     if (mime.startsWith('image/')) {
       const img = document.createElement('img');
-      img.src = url;
-      img.alt = filename;
+      img.src = url; img.alt = filename;
       div.appendChild(img);
     } else if (mime.startsWith('video/')) {
       const v = document.createElement('video');
-      v.src = url;
-      v.controls = true;
-      v.playsInline = true;
+      v.src = url; v.controls = true; v.playsInline = true;
       div.appendChild(v);
     } else if (mime.startsWith('audio/')) {
       const a = document.createElement('audio');
-      a.src = url;
-      a.controls = true;
+      a.src = url; a.controls = true;
       div.appendChild(a);
     }
 
@@ -111,56 +108,15 @@
     progressPct.textContent = '0%';
   }
 
-  // ---- WebRTC: RTCPeerConnection oluştur ----
-  function createPC() {
-    const conn = new RTCPeerConnection({
-      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] // yalnızca NAT geçişi; veri sunucuya gitmez
-    });
-
-    conn.onconnectionstatechange = () => {
-      const st = conn.connectionState;
-      if (st === 'connected') setStatus('Bağlı • Uçtan uca şifreli', 'ok');
-      else if (st === 'failed' || st === 'disconnected') setStatus('Bağlantı koptu', 'err');
-    };
-
-    if (ROLE === 'desktop') {
-      // Masaüstü tarafı veri kanalını açar
-      const channel = conn.createDataChannel('p2p', { ordered: true });
-      wireDataChannel(channel);
-    } else {
-      // Mobil tarafı veri kanalını bekler
-      conn.ondatachannel = (ev) => wireDataChannel(ev.channel);
-    }
-
-    return conn;
-  }
-
-  function wireDataChannel(channel) {
-    dc = channel;
-    channel.binaryType = 'arraybuffer';
-
-    channel.onopen = () => {
-      dataChannelReady = true;
-      showChat();
-      addMessage('🔐 P2P bağlantı kuruldu. Uçtan uca şifreli (DTLS).', 'them');
-    };
-
-    channel.onclose = () => {
-      dataChannelReady = false;
-      setStatus('Bağlantı kapandı', 'err');
-    };
-
-    channel.onmessage = (ev) => handleIncoming(ev.data);
-  }
-
-  // ---- Gelen veri işleyici ----
+  // ---- Gelen veri ----
   function handleIncoming(data) {
-    // Metin mesajı
     if (typeof data === 'string') {
       let payload;
       try { payload = JSON.parse(data); } catch { return; }
+
       if (payload.t === 'text') {
-        addMessage(payload.text, 'them', new Date(payload.ts).toLocaleTimeString('tr-TR'));
+        addMessage(payload.text, 'them',
+          new Date(payload.ts).toLocaleTimeString('tr-TR'));
       } else if (payload.t === 'file-start') {
         incomingFiles.set(payload.id, {
           name: payload.name,
@@ -183,10 +139,8 @@
 
     // Binary chunk
     if (data instanceof ArrayBuffer) {
-      // İlk 36 byte = dosya id (UUID string) → geri kalanı içerik
       const view = new Uint8Array(data);
-      const idBytes = view.slice(0, 36);
-      const id = new TextDecoder().decode(idBytes);
+      const id = new TextDecoder().decode(view.slice(0, 36));
       const content = data.slice(36);
 
       const f = incomingFiles.get(id);
@@ -199,25 +153,37 @@
     }
   }
 
-  // ---- Metin gönderme ----
+  // ---- PeerJS bağlantısını yapılandır ----
+  function wireConnection(c) {
+    conn = c;
+    c.on('open', () => {
+      dataChannelReady = true;
+      showChat();
+      addMessage('🔐 P2P bağlantı kuruldu (DTLS ile uçtan uca şifreli).', 'them');
+    });
+    c.on('data', handleIncoming);
+    c.on('close', () => {
+      dataChannelReady = false;
+      setStatus('Bağlantı kapandı', 'err');
+    });
+    c.on('error', (err) => {
+      setStatus('Bağlantı hatası: ' + err.type, 'err');
+    });
+  }
+
+  // ---- Metin / dosya gönderme ----
   function sendText(text) {
     if (!dataChannelReady) return;
-    const payload = JSON.stringify({ t: 'text', text, ts: Date.now() });
-    dc.send(payload);
+    conn.send(JSON.stringify({ t: 'text', text, ts: Date.now() }));
     addMessage(text, 'me', new Date().toLocaleTimeString('tr-TR'));
   }
 
-  // ---- Dosya gönderme (chunked) ----
   async function sendFile(file) {
     if (!dataChannelReady) return;
     const id = crypto.randomUUID();
-    const idBytes = new TextEncoder().encode(id); // 36 byte
-    if (idBytes.length !== 36) {
-      // UUID her zaman 36 karakter; güvence
-    }
+    const idBytes = new TextEncoder().encode(id);
 
-    // Bildirim
-    dc.send(JSON.stringify({
+    conn.send(JSON.stringify({
       t: 'file-start',
       id,
       name: file.name,
@@ -225,20 +191,15 @@
       mime: file.type || 'application/octet-stream'
     }));
 
-    // Gönderen tarafında da ön izleme (kendi mesajımız)
-    const preview = file.type.startsWith('image/') || file.type.startsWith('video/') || file.type.startsWith('audio/')
-      ? addBlobMessage(file, 'me', file.name, file.type)
-      : addBlobMessage(file, 'me', file.name, file.type || '');
-
+    addBlobMessage(file, 'me', file.name, file.type || '');
     showProgress(`Gönderiliyor: ${file.name}`, 0);
 
     let offset = 0;
     while (offset < file.size) {
-      // Buffer doluysa bekle
-      if (dc.bufferedAmount > HIGH_WATER) {
+      if (conn.dataChannel && conn.dataChannel.bufferedAmount > HIGH_WATER) {
         await new Promise((res) => {
           const check = () => {
-            if (dc.bufferedAmount <= HIGH_WATER) res();
+            if (!conn.dataChannel || conn.dataChannel.bufferedAmount <= HIGH_WATER) res();
             else setTimeout(check, 40);
           };
           check();
@@ -248,104 +209,70 @@
       const slice = file.slice(offset, offset + CHUNK_SIZE);
       const buf = await slice.arrayBuffer();
 
-      // id (36) + içerik
       const combined = new Uint8Array(idBytes.length + buf.byteLength);
       combined.set(idBytes, 0);
       combined.set(new Uint8Array(buf), idBytes.length);
 
-      dc.send(combined.buffer);
+      conn.send(combined.buffer);
       offset += buf.byteLength;
 
-      const pct = (offset / file.size) * 100;
-      showProgress(`Gönderiliyor: ${file.name}`, pct);
+      showProgress(`Gönderiliyor: ${file.name}`, (offset / file.size) * 100);
     }
 
-    dc.send(JSON.stringify({ t: 'file-end', id }));
+    conn.send(JSON.stringify({ t: 'file-end', id }));
     hideProgress();
   }
 
-  // ---- Masaüstü: QR üret ----
+  // ============================================================
+  // MASAÜSTÜ: peer aç → kısa ID'yi QR yap
+  // ============================================================
   async function initDesktop() {
     setStatus('Oturum hazırlanıyor…', 'wait');
-    pc = createPC();
 
-    // Teklif (offer) oluştur
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
+    // Rastgele, kısa peer ID (sadece harf+rakam)
+    const peerId = 'p2p-' + Math.random().toString(36).slice(2, 10);
 
-    // ICE toplama tamamlanmasını bekle
-    await new Promise((resolve) => {
-      if (pc.iceGatheringState === 'complete') return resolve();
-      const check = () => {
-        if (pc.iceGatheringState === 'complete') resolve();
-        else setTimeout(check, 100);
-      };
-      pc.onicegatheringstatechange = check;
-      check();
+    peer = new Peer(peerId, {
+      // Genel PeerJS broker'ı. İsterseniz kendi sunucunuzu da yazabilirsiniz.
+      // Bu sunucu YALNIZCA iki peer'ın tanışmasını sağlar; veri akmaz.
     });
 
-    const payload = JSON.stringify({
-      v: 1,
-      sdp: pc.localDescription.sdp,
-      type: pc.localDescription.type
+    peer.on('open', (id) => {
+      setStatus('QR kod hazır — telefonla okutun', 'wait');
+      renderQR(id);
     });
 
-    // QR göster
-    $('peerIdLabel').textContent = payload.slice(0, 10) + '…';
+    peer.on('error', (err) => {
+      setStatus('Sinyal hatası: ' + err.type, 'err');
+      if (err.type === 'unavailable-id') {
+        // ID çakıştı → yeniden dene
+        peer.destroy();
+        initDesktop();
+      }
+    });
+
+    // Mobil bağlanınca
+    peer.on('connection', (c) => {
+      wireConnection(c);
+    });
+  }
+
+  function renderQR(id) {
     const qrBox = $('qrcode');
     qrBox.innerHTML = '';
+    $('peerIdLabel').textContent = id;
     // eslint-disable-next-line no-undef
     new QRCode(qrBox, {
-      text: payload,
-      width: 260,
-      height: 260,
+      text: id,                 // SADECE kısa ID — dev SDP değil!
+      width: 280,
+      height: 280,
       correctLevel: QRCode.CorrectLevel.M
     });
-
-    setStatus('QR kod hazır — telefonla okutun', 'wait');
-
-    // Mobil taraftan cevap (answer) alınana kadar bekle:
-    // Cevabı almak için URL hash kullanmıyoruz; bunun yerine
-    // mobil taraftan gelen cevabı, aynı tarayıcı oturumundaki
-    // BroadcastChannel üzerinden alamayız (cihazlar farklı).
-    //
-    // Çözüm: Mobil taraf, cevabı tekrar QR olarak gösterir;
-    // masaüstü tarafı kamerayla okur. Bu, tamamen sunucusuz
-    // (SDP takası için bile sunucu gerekmez) bir akıştır.
-    //
-    // Ancak pratikte çoğu kullanıcı masaüstünde kamera bulundurmaz.
-    // Bu nedenle "manuel kod" (paste) alanı ekliyoruz:
-    // Mobil taraf cevabı kısa bir kod olarak gösterir, kullanıcı
-    // masaüstüne yapıştırır. (SDP küçük tutulur: sadece data channel.)
-    attachAnswerReceiver();
   }
 
-  function attachAnswerReceiver() {
-    // Cevap kodu için basit bir istem
-    const wrap = document.createElement('div');
-    wrap.style.cssText = 'margin-top:16px;display:flex;flex-direction:column;gap:8px;align-items:center;';
-    wrap.innerHTML = `
-      <p class="hint" style="margin:0">Mobil cihaz QR'ı okuttuktan sonra ekranda çıkan <b>yanıt kodunu</b> buraya yapıştırın:</p>
-      <textarea id="answerInput" placeholder="Yanıt kodunu yapıştırın…"
-        style="width:min(92vw,520px);height:90px;padding:10px;border-radius:10px;border:1px solid #334155;background:#1e293b;color:#e2e8f0;font-family:monospace;font-size:12px;"></textarea>
-      <button id="answerBtn" style="padding:10px 20px;border:none;border-radius:10px;background:#2563eb;color:#fff;font-weight:600;cursor:pointer;">Bağlan</button>
-    `;
-    qrSection.appendChild(wrap);
-
-    $('answerBtn').onclick = async () => {
-      const raw = $('answerInput').value.trim();
-      if (!raw) return;
-      try {
-        const answer = JSON.parse(raw);
-        await pc.setRemoteDescription(answer);
-        setStatus('Cevap alındı, bağlanıyor…', 'wait');
-      } catch (e) {
-        alert('Yanıt kodu geçersiz: ' + e.message);
-      }
-    };
-  }
-
-  // ---- Mobil: QR tara ----
+  // ============================================================
+  // MOBİL: QR oku → peer aç → masaüstüne bağlan
+  // ============================================================
   async function initMobile() {
     setStatus('Kamera açılıyor…', 'wait');
 
@@ -376,11 +303,12 @@
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
         const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
         // eslint-disable-next-line no-undef
-        const code = jsQR(img.data, img.width, img.height, { inversionAttempts: 'dontInvert' });
-        if (code && code.data) {
+        const code = jsQR(img.data, img.width, img.height,
+                          { inversionAttempts: 'dontInvert' });
+        if (code && code.data && code.data.startsWith('p2p-')) {
           scanning = false;
           stream.getTracks().forEach((t) => t.stop());
-          onQRScanned(code.data);
+          connectToPeer(code.data.trim());
           return;
         }
       }
@@ -390,58 +318,24 @@
     setStatus('QR aranıyor…', 'wait');
   }
 
-  async function onQRScanned(raw) {
-    let offer;
-    try { offer = JSON.parse(raw); } catch { alert('Geçersiz QR'); location.reload(); return; }
+  function connectToPeer(targetPeerId) {
+    setStatus('Bağlanıyor…', 'wait');
 
-    pc = createPC();
-    await pc.setRemoteDescription(offer);
-    const answer = await pc.createAnswer();
-    await pc.setLocalDescription(answer);
+    // Rastgele kendi ID'miz
+    const myId = 'p2p-' + Math.random().toString(36).slice(2, 10);
+    peer = new Peer(myId);
 
-    // ICE toplama tamamlanmasını bekle
-    await new Promise((resolve) => {
-      if (pc.iceGatheringState === 'complete') return resolve();
-      const check = () => {
-        if (pc.iceGatheringState === 'complete') resolve();
-        else setTimeout(check, 100);
-      };
-      pc.onicegatheringstatechange = check;
-      check();
+    peer.on('open', () => {
+      const c = peer.connect(targetPeerId, { reliable: true });
+      wireConnection(c);
     });
 
-    // Kısa cevap kodunu göster
-    const answerPayload = JSON.stringify({
-      type: pc.localDescription.type,
-      sdp: pc.localDescription.sdp
+    peer.on('error', (err) => {
+      setStatus('Bağlantı hatası: ' + err.type, 'err');
     });
-
-    showAnswerUI(answerPayload);
-    setStatus('Yanıt kodu hazır — masaüstüne yapıştırın', 'wait');
   }
 
-  function showAnswerUI(answerPayload) {
-    scanSection.innerHTML = `
-      <p class="hint">Aşağıdaki yanıt kodunu <b>bilgisayardaki</b> Web arayüzüne yapıştırın:</p>
-      <textarea readonly style="width:92vw;max-width:520px;height:120px;padding:10px;border-radius:10px;border:1px solid #334155;background:#1e293b;color:#93c5fd;font-family:monospace;font-size:11px;">${answerPayload.replace(/</g, '&lt;')}</textarea>
-      <button id="copyBtn" style="padding:10px 20px;border:none;border-radius:10px;background:#2563eb;color:#fff;font-weight:600;cursor:pointer;">📋 Kopyala</button>
-      <p class="tiny">Yapıştırdıktan sonra bağlantı otomatik kurulacak.</p>
-    `;
-    $('copyBtn').onclick = async () => {
-      try {
-        await navigator.clipboard.writeText(answerPayload);
-        $('copyBtn').textContent = '✅ Kopyalandı';
-      } catch {
-        // Fallback
-        const ta = document.querySelector('textarea');
-        ta.select();
-        document.execCommand('copy');
-        $('copyBtn').textContent = '✅ Kopyalandı';
-      }
-    };
-  }
-
-  // ---- Form olayları ----
+  // ---- Form / dosya olayları ----
   msgForm.addEventListener('submit', (e) => {
     e.preventDefault();
     const text = msgInput.value.trim();
@@ -453,9 +347,7 @@
 
   fileInput.addEventListener('change', async () => {
     const files = Array.from(fileInput.files || []);
-    for (const f of files) {
-      await sendFile(f);
-    }
+    for (const f of files) await sendFile(f);
     fileInput.value = '';
   });
 
@@ -463,7 +355,7 @@
   if (ROLE === 'desktop') initDesktop();
   else initMobile();
 
-  // ---- Service Worker kaydı ----
+  // ---- Service Worker ----
   if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => {
       navigator.serviceWorker.register('sw.js').catch(() => {});
