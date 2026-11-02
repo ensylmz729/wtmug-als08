@@ -268,77 +268,123 @@
   // ============================================================
   // MOBİL: QR oku → peer aç → bağlan
   // ============================================================
-  async function initMobile() {
-    setStatus('Kamera açılıyor…', 'wait');
-    const video = $('scanner');
+ async function initMobile() {
+  setStatus('Kamera açılıyor…', 'wait');
+  const video = $('scanner');
 
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      setStatus('Kamera desteklenmiyor (HTTPS gerekli)', 'err');
-      return;
-    }
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    setStatus('Kamera desteklenmiyor (HTTPS gerekli)', 'err');
+    return;
+  }
 
-    let stream;
-    try {
-      // DÜŞÜK çözünürlük: hem hızlı hem stabil
-      stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode: { ideal: 'environment' },
-          width:  { ideal: 640 },
-          height: { ideal: 480 }
-        },
-        audio: false
-      });
-    } catch (e) {
-      setStatus('Kamera erişimi reddedildi', 'err');
-      alert('Kamera erişimi gerekli: ' + e.message);
-      return;
-    }
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        facingMode: { ideal: 'environment' },
+        width:  { ideal: 640 },
+        height: { ideal: 480 }
+      },
+      audio: false
+    });
+  } catch (e) {
+    setStatus('Kamera erişimi reddedildi', 'err');
+    alert('Kamera hatası: ' + e.name + ' - ' + e.message);
+    return;
+  }
 
-    video.srcObject = stream;
+  // ★ KRİTİK DÜZELTME 1: track'in etkin olduğunu zorunlu olarak doğrula
+  const videoTrack = stream.getVideoTracks()[0];
+  if (!videoTrack) {
+    setStatus('Video track bulunamadı', 'err');
+    return;
+  }
+  videoTrack.enabled = true;  // enabled=false ise tüm kareler siyah olur
 
-    // Mobilde otomatik oynatma bazen engellenir → manuel de dene
-    try { await video.play(); } catch { /* kullanıcı dokununca başlar */ }
+  // ★ KRİTİK DÜZELTME 2: video öğesine ata ve meta verilerin yüklenmesini bekle
+  video.srcObject = stream;
+  video.setAttribute('playsinline', '');
+  video.setAttribute('webkit-playsinline', '');
+  video.muted = true;
+  video.autoplay = true;
 
-    // Kamera görüntüsü gelene kadar bekle
+  // loadeddata bekle (videoWidth/Height'nin geçerli olduğundan emin ol)
+  await new Promise((resolve, reject) => {
+    if (video.readyState >= 2) return resolve();
+    const onLoaded = () => { cleanup(); resolve(); };
+    const onError = () => { cleanup(); reject(new Error('video load error')); };
+    const cleanup = () => {
+      video.removeEventListener('loadeddata', onLoaded);
+      video.removeEventListener('error', onError);
+    };
+    video.addEventListener('loadeddata', onLoaded, { once: true });
+    video.addEventListener('error', onError, { once: true });
+    setTimeout(() => { cleanup(); reject(new Error('video load timeout')); }, 8000);
+  });
+
+  // ★ KRİTİK DÜZELTME 3: oynatmayı zorla ve gerçekten çalıştığını doğrula
+  try {
+    await video.play();
+  } catch (e) {
+    // Mobil tarayıcı otomatik oynatmayı engelleyebilir, kullanıcı dokunuşunu bekle
+    setStatus('Kamerayı başlatmak için ekrana dokunun', 'wait');
     await new Promise((resolve) => {
-      if (video.readyState >= 2) return resolve();
-      video.onloadeddata = () => resolve();
-      setTimeout(resolve, 2000); // güvenlik ağı
+      const onTouch = () => {
+        document.removeEventListener('touchstart', onTouch);
+        document.removeEventListener('click', onTouch);
+        video.play().then(resolve).catch(resolve);
+      };
+      document.addEventListener('touchstart', onTouch, { once: true });
+      document.addEventListener('click', onTouch, { once: true });
+    });
+  }
+
+  // playing olayını bekle (gerçekten kare ürettiğinden emin ol)
+  if (video.paused || video.ended) {
+    await new Promise((resolve) => {
+      video.addEventListener('playing', resolve, { once: true });
+      setTimeout(resolve, 3000);
+    });
+  }
+
+  // Son kontrol: videoWidth geçerli mi
+  if (video.videoWidth === 0 || video.videoHeight === 0) {
+    setStatus('Kamera görüntü üretmedi', 'err');
+    return;
+  }
+
+  setStatus('QR aranıyor…', 'wait');
+
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  let lastScan = 0;
+
+  const interval = setInterval(() => {
+    // Her taramada video'nun hala geçerli olduğunu kontrol et
+    if (video.readyState < 2 || video.videoWidth === 0) return;
+
+    const now = performance.now();
+    if (now - lastScan < 200) return;  // 200ms tarama aralığı
+    lastScan = now;
+
+    canvas.width  = video.videoWidth;
+    canvas.height = video.videoHeight;
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+    const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    if (!window.jsQR) return;
+    const code = jsQR(img.data, img.width, img.height, {
+      inversionAttempts: 'dontInvert'
     });
 
-    setStatus('QR aranıyor…', 'wait');
-
-    const canvas = document.createElement('canvas');
-    const ctx = canvas.getContext('2d', { willReadFrequently: true });
-    let lastScan = 0;
-
-    // setInterval: mobile'da requestAnimationFrame'ten daha stabil
-    const interval = setInterval(() => {
-      if (video.readyState < 2 || video.videoWidth === 0) return;
-
-      // Çok sık tarama yapmayalım → her ~200ms yeter
-      const now = performance.now();
-      if (now - lastScan < 150) return;
-      lastScan = now;
-
-      canvas.width  = video.videoWidth;
-      canvas.height = video.videoHeight;
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-
-      const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
-      if (!window.jsQR) return;
-      const code = jsQR(img.data, img.width, img.height, {
-        inversionAttempts: 'dontInvert'
-      });
-
-      if (code && code.data && code.data.startsWith('p2p-')) {
-        clearInterval(interval);
-        stream.getTracks().forEach((t) => t.stop());
-        video.srcObject = null;
-        connectToPeer(code.data.trim());
-      }
-    }, 150);
-  }
+    if (code && code.data && code.data.startsWith('p2p-')) {
+      clearInterval(interval);
+      stream.getTracks().forEach((t) => t.stop());
+      video.srcObject = null;
+      connectToPeer(code.data.trim());
+    }
+  }, 200);
+}
 
   function connectToPeer(targetId) {
     setStatus('Bağlanıyor…', 'wait');
