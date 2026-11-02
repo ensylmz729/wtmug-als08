@@ -1,42 +1,52 @@
 /* ============================================================
    P2P Transfer — Otomatik Sinyalleşme (PeerJS)
-   - QR'a yalnızca kısa peer ID gömülür (~13 karakter)
-   - Telefon QR'ı okur okumaz P2P bağlantı kendiliğinden kurulur
-   - Veri: WebRTC DataChannel, DTLS ile uçtan uca şifreli
-   - Sinyal broker'ı yalnızca eşleştirme yapar; içerik akmaz
+   - QR içeriği: sadece "p2p-xxxxxxxxxx" (~14 karakter)
+   - Telefon QR'ı okur okumaz WebRTC P2P bağlantı otomatik kurulur
+   - Veri: DTLS ile uçtan uca şifreli DataChannel
    ============================================================ */
 
 (() => {
   'use strict';
 
   const ROLE = document.body.dataset.role; // "desktop" | "mobile"
-  const CHUNK_SIZE = 16 * 1024;
-  const HIGH_WATER = 1024 * 1024;
+  const CHUNK_SIZE = 16 * 1024;            // 16 KB
+  const HIGH_WATER = 1024 * 1024;          // 1 MB buffer sınırı
 
   // ---- DOM ----
   const $ = (id) => document.getElementById(id);
   const statusBadge = $('status');
-  const qrSection = $('qrSection');
+  const qrSection   = $('qrSection');
   const scanSection = $('scanSection');
   const chatSection = $('chatSection');
-  const chatLog = $('chatLog');
-  const msgForm = $('msgForm');
-  const msgInput = $('msgInput');
-  const fileInput = $('fileInput');
-  const progressArea = $('progressArea');
+  const chatLog     = $('chatLog');
+  const msgForm     = $('msgForm');
+  const msgInput    = $('msgInput');
+  const fileInput   = $('fileInput');
+  const progressArea= $('progressArea');
   const progressBar = $('progressBar');
   const progressPct = $('progressPct');
   const progressLabel = $('progressLabel');
 
-  // ---- PeerJS / WebRTC ----
+  // ---- Durum ----
   let peer = null;
-  let conn = null;              // PeerJS DataConnection
-  let dataChannelReady = false;
-
+  let conn = null;
+  let ready = false;
   const incomingFiles = new Map();
 
-  // ---- UI ----
+  // ---- PeerJS yapılandırması (genel ücretsiz broker) ----
+  const PEER_OPTS = {
+    host: '0.peerjs.com',
+    port: 443,
+    secure: true,
+    path: '/',
+    debug: 0
+  };
+
+  // ============================================================
+  // UI yardımcıları
+  // ============================================================
   function setStatus(text, kind = 'wait') {
+    if (!statusBadge) return;
     statusBadge.textContent = text;
     statusBadge.className = 'badge ' +
       (kind === 'ok' ? 'badge-ok' : kind === 'err' ? 'badge-err' : 'badge-wait');
@@ -45,7 +55,7 @@
   function showChat() {
     qrSection?.classList.add('hidden');
     scanSection?.classList.add('hidden');
-    chatSection.classList.remove('hidden');
+    chatSection?.classList.remove('hidden');
     setStatus('Bağlı • Uçtan uca şifreli', 'ok');
   }
 
@@ -61,7 +71,6 @@
     }
     chatLog.appendChild(div);
     chatLog.scrollTop = chatLog.scrollHeight;
-    return div;
   }
 
   function addBlobMessage(blob, who, filename, mime) {
@@ -92,96 +101,91 @@
 
     chatLog.appendChild(div);
     chatLog.scrollTop = chatLog.scrollHeight;
-    return div;
   }
 
   function showProgress(label, pct) {
-    progressArea.classList.remove('hidden');
-    progressLabel.textContent = label;
+    progressArea?.classList.remove('hidden');
+    if (progressLabel) progressLabel.textContent = label;
     const p = Math.max(0, Math.min(100, Math.round(pct)));
-    progressBar.value = p;
-    progressPct.textContent = p + '%';
+    if (progressBar) progressBar.value = p;
+    if (progressPct) progressPct.textContent = p + '%';
   }
   function hideProgress() {
-    progressArea.classList.add('hidden');
-    progressBar.value = 0;
-    progressPct.textContent = '0%';
+    progressArea?.classList.add('hidden');
+    if (progressBar) progressBar.value = 0;
+    if (progressPct) progressPct.textContent = '0%';
   }
 
-  // ---- Gelen veri ----
+  // ============================================================
+  // Gelen veri
+  // ============================================================
   function handleIncoming(data) {
     if (typeof data === 'string') {
-      let payload;
-      try { payload = JSON.parse(data); } catch { return; }
+      let p;
+      try { p = JSON.parse(data); } catch { return; }
 
-      if (payload.t === 'text') {
-        addMessage(payload.text, 'them',
-          new Date(payload.ts).toLocaleTimeString('tr-TR'));
-      } else if (payload.t === 'file-start') {
-        incomingFiles.set(payload.id, {
-          name: payload.name,
-          size: payload.size,
-          mime: payload.mime,
-          chunks: [],
-          received: 0
+      if (p.t === 'text') {
+        addMessage(p.text, 'them', new Date(p.ts).toLocaleTimeString('tr-TR'));
+      } else if (p.t === 'file-start') {
+        incomingFiles.set(p.id, {
+          name: p.name, size: p.size, mime: p.mime,
+          chunks: [], received: 0
         });
-        showProgress(`Alınıyor: ${payload.name}`, 0);
-      } else if (payload.t === 'file-end') {
-        const f = incomingFiles.get(payload.id);
+        showProgress(`Alınıyor: ${p.name}`, 0);
+      } else if (p.t === 'file-end') {
+        const f = incomingFiles.get(p.id);
         if (!f) return;
         const blob = new Blob(f.chunks, { type: f.mime || 'application/octet-stream' });
         addBlobMessage(blob, 'them', f.name, f.mime || '');
-        incomingFiles.delete(payload.id);
+        incomingFiles.delete(p.id);
         hideProgress();
       }
       return;
     }
 
-    // Binary chunk
     if (data instanceof ArrayBuffer) {
       const view = new Uint8Array(data);
       const id = new TextDecoder().decode(view.slice(0, 36));
       const content = data.slice(36);
-
       const f = incomingFiles.get(id);
       if (!f) return;
       f.chunks.push(content);
       f.received += content.byteLength;
-
       const pct = f.size ? (f.received / f.size) * 100 : 0;
       showProgress(`Alınıyor: ${f.name}`, pct);
     }
   }
 
-  // ---- PeerJS bağlantısını yapılandır ----
+  // ============================================================
+  // PeerJS bağlantısı
+  // ============================================================
   function wireConnection(c) {
     conn = c;
     c.on('open', () => {
-      dataChannelReady = true;
+      ready = true;
       showChat();
       addMessage('🔐 P2P bağlantı kuruldu (DTLS ile uçtan uca şifreli).', 'them');
     });
     c.on('data', handleIncoming);
     c.on('close', () => {
-      dataChannelReady = false;
+      ready = false;
       setStatus('Bağlantı kapandı', 'err');
     });
     c.on('error', (err) => {
-      setStatus('Bağlantı hatası: ' + err.type, 'err');
+      setStatus('Hata: ' + (err.type || 'bilinmeyen'), 'err');
     });
   }
 
-  // ---- Metin / dosya gönderme ----
   function sendText(text) {
-    if (!dataChannelReady) return;
+    if (!ready) return;
     conn.send(JSON.stringify({ t: 'text', text, ts: Date.now() }));
     addMessage(text, 'me', new Date().toLocaleTimeString('tr-TR'));
   }
 
   async function sendFile(file) {
-    if (!dataChannelReady) return;
+    if (!ready) return;
     const id = crypto.randomUUID();
-    const idBytes = new TextEncoder().encode(id);
+    const idBytes = new TextEncoder().encode(id); // 36 byte
 
     conn.send(JSON.stringify({
       t: 'file-start',
@@ -196,10 +200,11 @@
 
     let offset = 0;
     while (offset < file.size) {
-      if (conn.dataChannel && conn.dataChannel.bufferedAmount > HIGH_WATER) {
+      const dchan = conn.dataChannel;
+      if (dchan && dchan.bufferedAmount > HIGH_WATER) {
         await new Promise((res) => {
           const check = () => {
-            if (!conn.dataChannel || conn.dataChannel.bufferedAmount <= HIGH_WATER) res();
+            if (!dchan || dchan.bufferedAmount <= HIGH_WATER) res();
             else setTimeout(check, 40);
           };
           check();
@@ -226,61 +231,61 @@
   // ============================================================
   // MASAÜSTÜ: peer aç → kısa ID'yi QR yap
   // ============================================================
-  async function initDesktop() {
+  function initDesktop() {
     setStatus('Oturum hazırlanıyor…', 'wait');
+    const peerId = 'p2p-' + Math.random().toString(36).slice(2, 12);
 
-    // Rastgele, kısa peer ID (sadece harf+rakam)
-    const peerId = 'p2p-' + Math.random().toString(36).slice(2, 10);
-
-    peer = new Peer(peerId, {
-      // Genel PeerJS broker'ı. İsterseniz kendi sunucunuzu da yazabilirsiniz.
-      // Bu sunucu YALNIZCA iki peer'ın tanışmasını sağlar; veri akmaz.
-    });
+    peer = new Peer(peerId, PEER_OPTS);
 
     peer.on('open', (id) => {
-      setStatus('QR kod hazır — telefonla okutun', 'wait');
-      renderQR(id);
+      setStatus('QR hazır — telefonla okutun', 'wait');
+      const qrBox = $('qrcode');
+      if (qrBox && window.QRCode) {
+        qrBox.innerHTML = '';
+        new QRCode(qrBox, {
+          text: id,             // sadece kısa ID
+          width: 280,
+          height: 280,
+          correctLevel: QRCode.CorrectLevel.M
+        });
+      }
+      const lbl = $('peerIdLabel');
+      if (lbl) lbl.textContent = id;
     });
 
     peer.on('error', (err) => {
-      setStatus('Sinyal hatası: ' + err.type, 'err');
       if (err.type === 'unavailable-id') {
-        // ID çakıştı → yeniden dene
         peer.destroy();
-        initDesktop();
+        setTimeout(initDesktop, 500);
+        return;
       }
+      setStatus('Sinyal hatası: ' + err.type, 'err');
     });
 
-    // Mobil bağlanınca
-    peer.on('connection', (c) => {
-      wireConnection(c);
-    });
-  }
-
-  function renderQR(id) {
-    const qrBox = $('qrcode');
-    qrBox.innerHTML = '';
-    $('peerIdLabel').textContent = id;
-    // eslint-disable-next-line no-undef
-    new QRCode(qrBox, {
-      text: id,                 // SADECE kısa ID — dev SDP değil!
-      width: 280,
-      height: 280,
-      correctLevel: QRCode.CorrectLevel.M
-    });
+    peer.on('connection', (c) => wireConnection(c));
   }
 
   // ============================================================
-  // MOBİL: QR oku → peer aç → masaüstüne bağlan
+  // MOBİL: QR oku → peer aç → bağlan
   // ============================================================
   async function initMobile() {
     setStatus('Kamera açılıyor…', 'wait');
-
     const video = $('scanner');
+
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setStatus('Kamera desteklenmiyor (HTTPS gerekli)', 'err');
+      return;
+    }
+
     let stream;
     try {
+      // DÜŞÜK çözünürlük: hem hızlı hem stabil
       stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'environment' },
+        video: {
+          facingMode: { ideal: 'environment' },
+          width:  { ideal: 640 },
+          height: { ideal: 480 }
+        },
         audio: false
       });
     } catch (e) {
@@ -288,45 +293,61 @@
       alert('Kamera erişimi gerekli: ' + e.message);
       return;
     }
+
     video.srcObject = stream;
-    await video.play();
+
+    // Mobilde otomatik oynatma bazen engellenir → manuel de dene
+    try { await video.play(); } catch { /* kullanıcı dokununca başlar */ }
+
+    // Kamera görüntüsü gelene kadar bekle
+    await new Promise((resolve) => {
+      if (video.readyState >= 2) return resolve();
+      video.onloadeddata = () => resolve();
+      setTimeout(resolve, 2000); // güvenlik ağı
+    });
+
+    setStatus('QR aranıyor…', 'wait');
 
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    let lastScan = 0;
 
-    let scanning = true;
-    const tick = () => {
-      if (!scanning) return;
-      if (video.readyState === video.HAVE_ENOUGH_DATA) {
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        // eslint-disable-next-line no-undef
-        const code = jsQR(img.data, img.width, img.height,
-                          { inversionAttempts: 'dontInvert' });
-        if (code && code.data && code.data.startsWith('p2p-')) {
-          scanning = false;
-          stream.getTracks().forEach((t) => t.stop());
-          connectToPeer(code.data.trim());
-          return;
-        }
+    // setInterval: mobile'da requestAnimationFrame'ten daha stabil
+    const interval = setInterval(() => {
+      if (video.readyState < 2 || video.videoWidth === 0) return;
+
+      // Çok sık tarama yapmayalım → her ~200ms yeter
+      const now = performance.now();
+      if (now - lastScan < 150) return;
+      lastScan = now;
+
+      canvas.width  = video.videoWidth;
+      canvas.height = video.videoHeight;
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+      const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      if (!window.jsQR) return;
+      const code = jsQR(img.data, img.width, img.height, {
+        inversionAttempts: 'dontInvert'
+      });
+
+      if (code && code.data && code.data.startsWith('p2p-')) {
+        clearInterval(interval);
+        stream.getTracks().forEach((t) => t.stop());
+        video.srcObject = null;
+        connectToPeer(code.data.trim());
       }
-      requestAnimationFrame(tick);
-    };
-    requestAnimationFrame(tick);
-    setStatus('QR aranıyor…', 'wait');
+    }, 150);
   }
 
-  function connectToPeer(targetPeerId) {
+  function connectToPeer(targetId) {
     setStatus('Bağlanıyor…', 'wait');
+    const myId = 'p2p-' + Math.random().toString(36).slice(2, 12);
 
-    // Rastgele kendi ID'miz
-    const myId = 'p2p-' + Math.random().toString(36).slice(2, 10);
-    peer = new Peer(myId);
+    peer = new Peer(myId, PEER_OPTS);
 
     peer.on('open', () => {
-      const c = peer.connect(targetPeerId, { reliable: true });
+      const c = peer.connect(targetId, { reliable: true });
       wireConnection(c);
     });
 
@@ -335,8 +356,10 @@
     });
   }
 
-  // ---- Form / dosya olayları ----
-  msgForm.addEventListener('submit', (e) => {
+  // ============================================================
+  // Form olayları
+  // ============================================================
+  msgForm?.addEventListener('submit', (e) => {
     e.preventDefault();
     const text = msgInput.value.trim();
     if (!text) return;
@@ -345,17 +368,19 @@
     msgInput.focus();
   });
 
-  fileInput.addEventListener('change', async () => {
+  fileInput?.addEventListener('change', async () => {
     const files = Array.from(fileInput.files || []);
     for (const f of files) await sendFile(f);
     fileInput.value = '';
   });
 
-  // ---- Başlat ----
+  // ============================================================
+  // Başlat
+  // ============================================================
   if (ROLE === 'desktop') initDesktop();
-  else initMobile();
+  else if (ROLE === 'mobile') initMobile();
 
-  // ---- Service Worker ----
+  // Service Worker
   if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => {
       navigator.serviceWorker.register('sw.js').catch(() => {});
