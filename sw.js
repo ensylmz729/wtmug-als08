@@ -1,5 +1,4 @@
-/* Basit çevrimdışı önbellek — kabuk dosyalar */
-const CACHE = 'p2p-transfer-v1';
+const CACHE = 'p2p-transfer-v2';
 const ASSETS = [
   './',
   './index.html',
@@ -13,33 +12,27 @@ const ASSETS = [
 
 self.addEventListener('install', (e) => {
   e.waitUntil(
-    caches.open(CACHE)
-      .then((c) => c.addAll(ASSETS))
-      .then(() => self.skipWaiting())
+    caches.open(CACHE).then((c) => c.addAll(ASSETS)).then(() => self.skipWaiting())
   );
 });
 
 self.addEventListener('activate', (e) => {
   e.waitUntil(
     caches.keys()
-      .then((keys) =>
-        Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k)))
-      )
+      .then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k))))
       .then(() => self.clients.claim())
   );
 });
 
 self.addEventListener('fetch', (e) => {
   const req = e.request;
-
-  // Yalnızca GET istekleri önbelleğe alınır
   if (req.method !== 'GET') return;
 
-  // Uzak CDN istekleri (QR/jsqr) için: network-first, çevrimdışıysa cache
   const url = new URL(req.url);
-  const isSameOrigin = url.origin === self.location.origin;
+  const sameOrigin = url.origin === self.location.origin;
 
-  if (!isSameOrigin) {
+  if (!sameOrigin) {
+    // CDN: network-first
     e.respondWith(
       fetch(req)
         .then((res) => {
@@ -52,10 +45,10 @@ self.addEventListener('fetch', (e) => {
     return;
   }
 
-  // Aynı kaynak: cache-first, arka planda güncelle (stale-while-revalidate)
+  // Kendi kaynaklarımız: cache-first + arka planda güncelle
   e.respondWith(
     caches.match(req).then((cached) => {
-      const network = fetch(req)
+      const net = fetch(req)
         .then((res) => {
           if (res && res.status === 200) {
             const copy = res.clone();
@@ -64,8 +57,7 @@ self.addEventListener('fetch', (e) => {
           return res;
         })
         .catch(() => cached);
-
-      return cached || network;
+      return cached || net;
     })
   );
 });
