@@ -2,38 +2,35 @@
 <html lang="tr">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <title>P2P Transfer — Mobil</title>
   <link rel="manifest" href="manifest.json" />
   <meta name="theme-color" content="#2563eb" />
   <link rel="icon" href="icon-192.png" />
   <link rel="stylesheet" href="style.css" />
-  <!-- Mevcut <head> içine, jsQR'den ÖNCE ekleyin: -->
-<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
 </head>
 <body data-role="mobile">
   <header class="app-header">
     <h1>📱 P2P Transfer — Mobil</h1>
-    <span id="status" class="badge badge-wait">QR okutun</span>
+    <span id="status" class="badge badge-wait">Kamera açılıyor…</span>
   </header>
 
-  <!-- QR Tarama -->
   <section id="scanSection" class="scan-section">
     <p class="hint">Bilgisayar ekranındaki QR kodu kameraya gösterin.</p>
     <div class="video-wrap">
-      <video id="scanner" playsinline muted></video>
+      <!-- ÖNEMLİ: playsinline + muted + autoplay mobilde siyah ekranı engeller -->
+      <video id="scanner" playsinline webkit-playsinline muted autoplay></video>
       <div class="scan-frame"></div>
     </div>
-    <p class="tiny">Kamera yalnızca QR okumak için kullanılır, hiçbir görüntü kaydedilmez.</p>
+    <p class="tiny">Kamera yalnızca QR okumak için kullanılır; hiçbir görüntü kaydedilmez.</p>
   </section>
 
-  <!-- Sohbet Ekranı -->
   <section id="chatSection" class="chat-section hidden">
     <div id="chatLog" class="chat-log"></div>
 
     <div id="progressArea" class="progress-area hidden">
       <div class="progress-row">
-        <span id="progressLabel">Dosya aktarılıyor…</span>
+        <span id="progressLabel">Aktarılıyor…</span>
         <span id="progressPct">0%</span>
       </div>
       <progress id="progressBar" value="0" max="100"></progress>
@@ -52,7 +49,7 @@
     </div>
   </section>
 
-  <!-- jsQR (QR okuma kütüphanesi) -->
+  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
   <script src="app.js"></script>
 </body>
