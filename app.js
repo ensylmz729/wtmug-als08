@@ -1,8 +1,8 @@
 /* ============================================================
    P2P Transfer – Ortak WebRTC Modülü
-   İki arayüz de bu dosyayı kullanır.
-   - Web (index.html):  offer üretir, QR gösterir, cevap kodunu yapıştırır
-   - Mobil (mobile.html): QR okur, cevap kodu üretir, kopyalar
+   Bilgisayarda kamera YOK varsayımıyla:
+   - Web (index.html):  offer üretir → QR gösterir → cevap kodunu yapıştırır
+   - Mobil (mobile.html): QR okur → cevap kodu üretir → kopyalar
    ============================================================ */
 
 const P2P = (() => {
@@ -17,18 +17,20 @@ const P2P = (() => {
   let dc = null;
   let pendingCandidates = [];
   let incomingFile = null;
+  let hooks = {};
 
-  /* ---------- Ortak: DataChannel ---------- */
-  function setupChannel(channel, hooks) {
+  /* ---------- DataChannel kurulumu ---------- */
+  function setupChannel(channel) {
     channel.binaryType = 'arraybuffer';
 
     channel.onopen = () => hooks.onOpen && hooks.onOpen();
     channel.onclose = () => hooks.onClose && hooks.onClose();
     channel.onerror = (e) => hooks.onError && hooks.onError(e);
-    channel.onmessage = (e) => handleIncoming(e.data, hooks);
+    channel.onmessage = (e) => handleIncoming(e.data);
   }
 
-  function handleIncoming(data, hooks) {
+  /* ---------- Gelen veri ---------- */
+  function handleIncoming(data) {
     if (typeof data === 'string') {
       let obj;
       try { obj = JSON.parse(data); } catch { return; }
@@ -38,7 +40,7 @@ const P2P = (() => {
         incomingFile = { name: obj.name, type: obj.type, size: obj.size, chunks: [], received: 0 };
         hooks.onProgress && hooks.onProgress(`Alınıyor: ${obj.name}`, 0);
       } else if (obj.k === 'file-end') {
-        finishIncoming(hooks);
+        finishIncoming();
       }
       return;
     }
@@ -47,11 +49,11 @@ const P2P = (() => {
       incomingFile.received += data.byteLength;
       const pct = Math.min(100, Math.round((incomingFile.received / incomingFile.size) * 100));
       hooks.onProgress && hooks.onProgress(`Alınıyor: ${incomingFile.name}`, pct);
-      if (pct >= 100) finishIncoming(hooks);
+      if (pct >= 100) finishIncoming();
     }
   }
 
-  function finishIncoming(hooks) {
+  function finishIncoming() {
     if (!incomingFile) return;
     const blob = new Blob(incomingFile.chunks, { type: incomingFile.type || 'application/octet-stream' });
     hooks.onFile && hooks.onFile(blob, incomingFile.name, incomingFile.type, false);
@@ -59,22 +61,29 @@ const P2P = (() => {
     incomingFile = null;
   }
 
-  /* ---------- Web tarafı: offer üret ---------- */
-  async function createOffer(hooks) {
+  /* ---------- Web tarafı: offer üret → QR için hazır ---------- */
+  async function createOffer(h) {
+    hooks = h || {};
     pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
     dc = pc.createDataChannel('data', { ordered: true });
-    setupChannel(dc, hooks);
+    setupChannel(dc);
 
     pendingCandidates = [];
     pc.onicecandidate = (e) => {
-      if (e.candidate) pendingCandidates.push(e.candidate.toJSON());
-      else if (hooks.onOfferReady) {
-        hooks.onOfferReady(JSON.stringify({
+      if (e.candidate) {
+        pendingCandidates.push(e.candidate.toJSON());
+      } else {
+        // ICE toplama bitti → offer + adayları QR için ver
+        hooks.onOfferReady && hooks.onOfferReady(JSON.stringify({
           t: 'offer',
           sdp: pc.localDescription.sdp,
           cand: pendingCandidates
         }));
       }
+    };
+
+    pc.onconnectionstatechange = () => {
+      hooks.onConnState && hooks.onConnState(pc.connectionState);
     };
 
     const offer = await pc.createOffer();
@@ -93,7 +102,8 @@ const P2P = (() => {
   }
 
   /* ---------- Mobil tarafı: offer'dan answer üret ---------- */
-  async function acceptOfferAndAnswer(raw, hooks) {
+  async function acceptOfferAndAnswer(raw, h) {
+    hooks = h || {};
     let payload;
     try { payload = JSON.parse(raw); } catch { throw new Error('QR verisi JSON değil'); }
     if (payload.t !== 'offer') throw new Error('Bu bir offer değil');
@@ -103,10 +113,13 @@ const P2P = (() => {
 
     pc.ondatachannel = (e) => {
       dc = e.channel;
-      setupChannel(dc, hooks);
+      setupChannel(dc);
     };
     pc.onicecandidate = (e) => {
       if (e.candidate) pendingCandidates.push(e.candidate.toJSON());
+    };
+    pc.onconnectionstatechange = () => {
+      hooks.onConnState && hooks.onConnState(pc.connectionState);
     };
 
     await pc.setRemoteDescription({ type: 'offer', sdp: payload.sdp });
@@ -116,6 +129,7 @@ const P2P = (() => {
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
 
+    // ICE toplama tamamlanana kadar bekle (max 3 sn)
     await new Promise(res => {
       if (pc.iceGatheringState === 'complete') return res();
       const check = () => {
@@ -135,17 +149,22 @@ const P2P = (() => {
     });
   }
 
-  /* ---------- Ortak: mesaj gönder ---------- */
+  /* ---------- Metin gönder ---------- */
   function sendText(v) {
     if (!v || !dc || dc.readyState !== 'open') return false;
     dc.send(JSON.stringify({ k: 'text', v }));
     return true;
   }
 
-  /* ---------- Ortak: dosya gönder ---------- */
-  async function sendFile(file, hooks) {
+  /* ---------- Dosya gönder (chunking + backpressure) ---------- */
+  async function sendFile(file) {
     if (!dc || dc.readyState !== 'open') return;
-    dc.send(JSON.stringify({ k: 'file-meta', name: file.name, type: file.type, size: file.size }));
+    dc.send(JSON.stringify({
+      k: 'file-meta',
+      name: file.name,
+      type: file.type,
+      size: file.size
+    }));
 
     const reader = file.stream().getReader();
     let sent = 0;
@@ -175,9 +194,17 @@ const P2P = (() => {
     }
   }
 
+  /* ---------- Durum ---------- */
   function isOpen() {
-    return dc && dc.readyState === 'open';
+    return !!(dc && dc.readyState === 'open');
   }
 
-  return { createOffer, applyAnswer, acceptOfferAndAnswer, sendText, sendFile, isOpen };
+  return {
+    createOffer,
+    applyAnswer,
+    acceptOfferAndAnswer,
+    sendText,
+    sendFile,
+    isOpen
+  };
 })();
