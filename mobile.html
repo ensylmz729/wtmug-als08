@@ -23,8 +23,7 @@
   .msg img, .msg video { max-width:100%; border-radius:6px; display:block; }
   .msg a.dl { color:#93c5fd; }
   .row { display:flex; gap:8px; margin-top:12px; }
-  input[type=text], textarea { flex:1; padding:12px; border-radius:8px; border:1px solid #334155; background:#0b1220; color:#e2e8f0; font-size:16px; font-family: inherit; }
-  textarea { width:100%; min-height:120px; resize:vertical; font-size:12px; }
+  input[type=text] { flex:1; padding:12px; border-radius:8px; border:1px solid #334155; background:#0b1220; color:#e2e8f0; font-size:16px; font-family: inherit; }
   button { padding:12px 16px; border-radius:8px; border:none; background:#2563eb; color:#fff; cursor:pointer; font-weight:600; font-size:15px; }
   button:disabled { opacity:.5; }
   button.secondary { background:#334155; }
@@ -82,21 +81,14 @@
 </main>
 
 <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+<script src="app.js"></script>
 <script>
 /* ============================================================
-   P2P WebRTC – Mobil tarafı
-   Akış:
-   1) Telefon, bilgisayarın QR'ındaki offer'ı okur.
-   2) Answer + ICE üretir, KOPYALANABİLİR KOD olarak gösterir.
-   3) Kullanıcı kodu bilgisayara yapıştırır → bağlantı kurulur.
+   Mobil Arayüzü – app.js kullanır
+   1) Kamerayla bilgisayardaki QR'ı (offer) okur
+   2) app.js'ten cevap kodu alır, ekranda gösterir (kopyalanabilir)
+   3) Kullanıcı kodu bilgisayara yapıştırır → bağlantı kurulur
    ============================================================ */
-
-const ICE_SERVERS = [
-  { urls: 'stun:stun.l.google.com:19302' },
-  { urls: 'stun:stun1.l.google.com:19302' }
-];
-const CHUNK_SIZE = 16 * 1024;
-const MAX_BUFFERED = 8 * 1024 * 1024;
 
 const els = {
   scanView: document.getElementById('scanView'),
@@ -117,14 +109,40 @@ const els = {
   progressLabel: document.getElementById('progressLabel'),
 };
 
-let pc = null;
-let dc = null;
-let pendingCandidates = [];
-let incomingFile = null;
+/* ---------- app.js için hooks ---------- */
+const hooks = {
+  onOpen() {
+    els.answerView.classList.add('hidden');
+    els.scanView.classList.add('hidden');
+    els.chatView.classList.remove('hidden');
+    els.sendBtn.disabled = false;
+    addSystem('Bağlantı kuruldu ✅');
+  },
+  onClose() {
+    els.sendBtn.disabled = true;
+    addSystem('Bağlantı kapandı.');
+  },
+  onError(e) {
+    addSystem('Hata: ' + (e.message || 'bilinmeyen'));
+  },
+  onText(v) {
+    addMsg(v, 'them');
+  },
+  onFile(blob, name, type, mine) {
+    addFileMessage(blob, name, type, mine);
+  },
+  onProgress(label, pct) {
+    showProgress(label, pct);
+  },
+  onProgressHide() {
+    hideProgress();
+  }
+};
+
+/* ---------- QR tarama ---------- */
 let scanStream = null;
 let scanning = true;
 
-/* ---------- 1) Offer QR oku ---------- */
 async function startScan() {
   try {
     scanStream = await navigator.mediaDevices.getUserMedia({
@@ -156,9 +174,12 @@ async function startScan() {
       const code = jsQR(img.data, img.width, img.height);
       if (code && code.data) {
         scanning = false;
-        if (scanStream) { scanStream.getTracks().forEach(t => t.stop()); scanStream = null; }
+        if (scanStream) {
+          scanStream.getTracks().forEach(t => t.stop());
+          scanStream = null;
+        }
         els.status.textContent = 'QR okundu, cevap hazırlanıyor…';
-        handleOfferQR(code.data);
+        handleOffer(code.data);
         return;
       }
     }
@@ -167,193 +188,73 @@ async function startScan() {
   tick();
 }
 
-/* ---------- 2) Offer → answer ---------- */
-async function handleOfferQR(raw) {
-  let payload;
-  try { payload = JSON.parse(raw); } catch { return; }
-  if (payload.t !== 'offer') return;
-
-  pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
-  pendingCandidates = [];
-
-  pc.ondatachannel = (e) => {
-    dc = e.channel;
-    setupDataChannel(dc);
-  };
-
-  pc.onicecandidate = (e) => {
-    if (e.candidate) pendingCandidates.push(e.candidate.toJSON());
-  };
-
-  pc.onconnectionstatechange = () => {
-    if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
-      els.answerStatus.textContent = 'bağlantı durumu: ' + pc.connectionState;
-    }
-  };
-
+/* ---------- Offer'ı işle, cevap kodu üret ---------- */
+async function handleOffer(raw) {
   try {
-    await pc.setRemoteDescription({ type: 'offer', sdp: payload.sdp });
-    for (const c of payload.cand || []) {
-      try { await pc.addIceCandidate(c); } catch {}
-    }
-    const answer = await pc.createAnswer();
-    await pc.setLocalDescription(answer);
-  } catch (e) {
-    els.status.textContent = 'Offer işlenemedi: ' + e.message;
-    return;
-  }
+    const codeStr = await P2P.acceptOfferAndAnswer(raw, hooks);
 
-  // ICE toplama tamamlanana kadar bekle (max 3 sn)
-  await new Promise(res => {
-    if (pc.iceGatheringState === 'complete') return res();
-    const check = () => {
-      if (pc.iceGatheringState === 'complete') {
-        pc.removeEventListener('icegatheringstatechange', check);
-        res();
+    els.scanView.classList.add('hidden');
+    els.answerView.classList.remove('hidden');
+    els.answerCode.textContent = codeStr;
+    els.answerStatus.textContent = 'Bu kodu bilgisayara yapıştırın…';
+
+    /* Kopyala */
+    els.copyBtn.onclick = async () => {
+      try {
+        await navigator.clipboard.writeText(codeStr);
+        els.answerStatus.textContent = '✅ Kopyalandı!';
+      } catch {
+        const ta = document.createElement('textarea');
+        ta.value = codeStr;
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+        els.answerStatus.textContent = '✅ Kopyalandı!';
       }
     };
-    pc.addEventListener('icegatheringstatechange', check);
-    setTimeout(res, 3000);
-  });
 
-  const answerPayload = {
-    t: 'answer',
-    sdp: pc.localDescription.sdp,
-    cand: pendingCandidates,
-  };
-  const codeStr = JSON.stringify(answerPayload);
-
-  // UI'ya geç
-  els.scanView.classList.add('hidden');
-  els.answerView.classList.remove('hidden');
-  els.answerCode.textContent = codeStr;
-  els.answerStatus.textContent = 'Bu kodu bilgisayara yapıştırın…';
-
-  // Kopyala butonu
-  els.copyBtn.onclick = async () => {
-    try {
-      await navigator.clipboard.writeText(codeStr);
-      els.answerStatus.textContent = '✅ Kopyalandı!';
-    } catch {
-      // fallback
-      const ta = document.createElement('textarea');
-      ta.value = codeStr;
-      document.body.appendChild(ta);
-      ta.select();
-      document.execCommand('copy');
-      document.body.removeChild(ta);
-      els.answerStatus.textContent = '✅ Kopyalandı!';
-    }
-  };
-
-  // Paylaş butonu
-  els.shareBtn.onclick = async () => {
-    if (navigator.share) {
-      try {
-        await navigator.share({ title: 'P2P Cevap Kodu', text: codeStr });
-      } catch {}
-    } else {
-      els.copyBtn.click();
-    }
-  };
-}
-
-/* ---------- 3) DataChannel ---------- */
-function setupDataChannel(channel) {
-  channel.binaryType = 'arraybuffer';
-
-  channel.onopen = () => {
-    els.answerView.classList.add('hidden');
-    els.scanView.classList.add('hidden');
-    els.chatView.classList.remove('hidden');
-    els.sendBtn.disabled = false;
-    addSystem('Bağlantı kuruldu ✅');
-  };
-  channel.onclose = () => {
-    els.sendBtn.disabled = true;
-    addSystem('Bağlantı kapandı.');
-  };
-  channel.onerror = (e) => {
-    addSystem('DataChannel hatası: ' + (e.message || 'bilinmeyen'));
-  };
-  channel.onmessage = (e) => handleIncoming(e.data);
-}
-
-/* ---------- 4) Gelen veri ---------- */
-function handleIncoming(data) {
-  if (typeof data === 'string') {
-    let obj;
-    try { obj = JSON.parse(data); } catch { return; }
-    if (obj.k === 'text') addMsg(obj.v, 'them');
-    else if (obj.k === 'file-meta') {
-      incomingFile = { name: obj.name, type: obj.type, size: obj.size, chunks: [], received: 0 };
-      showProgress(`Alınıyor: ${obj.name}`, 0);
-    } else if (obj.k === 'file-end') {
-      finishIncomingFile();
-    }
-    return;
-  }
-  if (data instanceof ArrayBuffer && incomingFile) {
-    incomingFile.chunks.push(data);
-    incomingFile.received += data.byteLength;
-    const pct = Math.min(100, Math.round((incomingFile.received / incomingFile.size) * 100));
-    showProgress(`Alınıyor: ${incomingFile.name}`, pct);
-    if (pct >= 100) finishIncomingFile();
-  }
-}
-
-function finishIncomingFile() {
-  if (!incomingFile) return;
-  const blob = new Blob(incomingFile.chunks, { type: incomingFile.type || 'application/octet-stream' });
-  addFileMessage(blob, incomingFile.name, incomingFile.type);
-  hideProgress();
-  incomingFile = null;
-}
-
-/* ---------- 5) Metin gönder ---------- */
-function sendText() {
-  const v = els.msgInput.value.trim();
-  if (!v || !dc || dc.readyState !== 'open') return;
-  dc.send(JSON.stringify({ k: 'text', v }));
-  addMsg(v, 'me');
-  els.msgInput.value = '';
-}
-
-/* ---------- 6) Dosya gönder ---------- */
-async function sendFile(file) {
-  if (!dc || dc.readyState !== 'open') return;
-  dc.send(JSON.stringify({ k: 'file-meta', name: file.name, type: file.type, size: file.size }));
-
-  const reader = file.stream().getReader();
-  let sent = 0;
-  showProgress(`Gönderiliyor: ${file.name}`, 0);
-  addMsg(`📤 ${file.name} gönderiliyor…`, 'me');
-
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      for (let off = 0; off < value.length; off += CHUNK_SIZE) {
-        const chunk = value.slice(off, off + CHUNK_SIZE);
-        while (dc.bufferedAmount > MAX_BUFFERED) {
-          await new Promise(r => setTimeout(r, 30));
-        }
-        dc.send(chunk);
-        sent += chunk.byteLength;
-        const pct = Math.min(100, Math.round((sent / file.size) * 100));
-        showProgress(`Gönderiliyor: ${file.name}`, pct);
+    /* Paylaş */
+    els.shareBtn.onclick = async () => {
+      if (navigator.share) {
+        try {
+          await navigator.share({ title: 'P2P Cevap Kodu', text: codeStr });
+        } catch {}
+      } else {
+        els.copyBtn.click();
       }
-    }
-    dc.send(JSON.stringify({ k: 'file-end' }));
-    hideProgress();
-    addFileMessage(file, file.name, file.type);
-  } catch (err) {
-    hideProgress();
-    addSystem('Dosya gönderme hatası: ' + err.message);
+    };
+  } catch (e) {
+    els.status.textContent = 'Hata: ' + e.message;
+    // Yeniden taramaya dön
+    scanning = true;
+    startScan();
   }
 }
 
-/* ---------- 7) UI ---------- */
+/* ---------- Mesaj gönder ---------- */
+els.sendBtn.addEventListener('click', () => {
+  const v = els.msgInput.value.trim();
+  if (P2P.sendText(v)) {
+    addMsg(v, 'me');
+    els.msgInput.value = '';
+  }
+});
+els.msgInput.addEventListener('keydown', e => {
+  if (e.key === 'Enter') els.sendBtn.click();
+});
+
+/* ---------- Dosya gönder ---------- */
+els.fileInput.addEventListener('change', e => {
+  const f = e.target.files[0];
+  if (f) {
+    addMsg(`📤 ${f.name} gönderiliyor…`, 'me');
+    P2P.sendFile(f);
+  }
+  e.target.value = '';
+});
+
+/* ---------- UI yardımcıları ---------- */
 function addMsg(text, who) {
   const div = document.createElement('div');
   div.className = 'msg ' + who;
@@ -370,17 +271,25 @@ function addSystem(text) {
   els.chat.appendChild(div);
   els.chat.scrollTop = els.chat.scrollHeight;
 }
-function addFileMessage(blobOrFile, name, type) {
+function addFileMessage(blob, name, type, mine) {
   const div = document.createElement('div');
-  div.className = 'msg ' + (blobOrFile instanceof File ? 'me' : 'them');
-  const url = URL.createObjectURL(blobOrFile);
+  div.className = 'msg ' + (mine ? 'me' : 'them');
+  const url = URL.createObjectURL(blob);
   if (type && type.startsWith('image/')) {
-    const img = document.createElement('img'); img.src = url; div.appendChild(img);
+    const img = document.createElement('img');
+    img.src = url;
+    div.appendChild(img);
   } else if (type && type.startsWith('video/')) {
-    const vid = document.createElement('video'); vid.src = url; vid.controls = true; div.appendChild(vid);
+    const vid = document.createElement('video');
+    vid.src = url;
+    vid.controls = true;
+    div.appendChild(vid);
   } else {
     const a = document.createElement('a');
-    a.href = url; a.download = name; a.textContent = '⬇ İndir: ' + name; a.className = 'dl';
+    a.href = url;
+    a.download = name;
+    a.textContent = '⬇ İndir: ' + name;
+    a.className = 'dl';
     div.appendChild(a);
   }
   els.chat.appendChild(div);
@@ -391,21 +300,15 @@ function showProgress(label, pct) {
   els.progressLabel.textContent = label + ' – %' + pct;
   els.progress.value = pct;
 }
-function hideProgress() { els.progressWrap.classList.add('hidden'); }
+function hideProgress() {
+  els.progressWrap.classList.add('hidden');
+}
 
-/* ---------- 8) Olaylar & başlat ---------- */
-els.sendBtn.addEventListener('click', sendText);
-els.msgInput.addEventListener('keydown', e => { if (e.key === 'Enter') sendText(); });
-els.fileInput.addEventListener('change', e => {
-  const f = e.target.files[0];
-  if (f) sendFile(f);
-  e.target.value = '';
-});
-
+/* ---------- Başlat ---------- */
 startScan();
 
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('sw.js').catch(()=>{});
+  navigator.serviceWorker.register('sw.js').catch(() => {});
 }
 </script>
 </body>
