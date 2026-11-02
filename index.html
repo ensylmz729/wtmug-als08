@@ -31,22 +31,22 @@
   progress { width:100%; height:12px; }
   .hidden { display:none; }
   .hint { font-size:13px; color:#94a3b8; }
+  #scanVideo { width:100%; max-width:360px; border-radius:8px; margin-top:12px; background:#000; }
 </style>
 </head>
 <body>
 <header><h1>🖥️ P2P Transfer — Web Arayüzü</h1></header>
 <main>
-  <!-- Bağlantı kurulmadı: QR göster -->
   <section id="connectView" class="card">
-    <p>Telefonunuzdaki <b>Mobil Arayüzü</b> açıp aşağıdaki QR kodu okutun.</p>
+    <p>Telefonunuzdaki <b>Mobil Arayüzü</b> açıp aşağıdaki QR kodu okutun. Ardından telefonun gösterdiği cevap QR kodunu bu sayfadaki kameraya gösterin.</p>
     <div class="qr-wrap">
       <canvas id="qr"></canvas>
       <div id="status">Bağlantı bekleniyor…</div>
     </div>
     <p class="hint">Durum: <span id="peerStatus">oda oluşturuluyor</span></p>
+    <video id="scanVideo" playsinline muted class="hidden"></video>
   </section>
 
-  <!-- Bağlantı kuruldu: sohbet -->
   <section id="chatView" class="hidden">
     <div class="card">
       <div id="chat" class="chat"></div>
@@ -65,18 +65,14 @@
   </section>
 </main>
 
-<!-- QR kod kütüphanesi (CDN) -->
 <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
 <script>
 /* ============================================================
    P2P WebRTC – Web tarafı
    Sinyalleşme sunucusu YOK.
-   - Web tarafı "oda" oluşturur: offer SDP'sini oluşturur, ICE
-     adaylarını toplar, hepsini JSON'a paketleyip QR'a gömer.
-   - Mobil taraf QR'dan offer'ı okur, answer üretir, bu answer'ı
-     tekrar QR olarak gösterir. Web tarafı kamerayla bu answer
-     QR'ını okuyarak bağlantıyı tamamlar.
-   (Tamamen sunucusuz, sadece QR kod alışverişi.)
+   Web: offer + ICE → QR #1 gösterir → kamerayla answer QR okur.
+   Mobil: QR #1 okur → answer + ICE → QR #2 gösterir.
    ============================================================ */
 
 const ICE_SERVERS = [
@@ -84,7 +80,8 @@ const ICE_SERVERS = [
   { urls: 'stun:stun1.l.google.com:19302' }
 ];
 
-const CHUNK_SIZE = 16 * 1024; // 16 KB (güvenli aralık)
+const CHUNK_SIZE = 16 * 1024;
+const MAX_BUFFERED = 8 * 1024 * 1024;
 
 const els = {
   connectView: document.getElementById('connectView'),
@@ -92,6 +89,7 @@ const els = {
   qrCanvas: document.getElementById('qr'),
   status: document.getElementById('status'),
   peerStatus: document.getElementById('peerStatus'),
+  scanVideo: document.getElementById('scanVideo'),
   chat: document.getElementById('chat'),
   msgInput: document.getElementById('msgInput'),
   sendBtn: document.getElementById('sendBtn'),
@@ -104,9 +102,11 @@ const els = {
 let pc = null;
 let dc = null;
 let pendingCandidates = [];
-let incomingFile = null; // {name,type,size,chunks:[],received:0}
+let incomingFile = null;
+let scanStream = null;
+let scanRafId = null;
 
-/* ---------- 1) Oda oluştur (offer + ICE topla → QR) ---------- */
+/* ---------- 1) Oda oluştur ---------- */
 async function createRoom() {
   pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
   dc = pc.createDataChannel('data', { ordered: true });
@@ -116,8 +116,13 @@ async function createRoom() {
     if (e.candidate) {
       pendingCandidates.push(e.candidate.toJSON());
     } else {
-      // ICE toplama bitti → offer + adayları QR'a göm
       embedOfferInQR();
+    }
+  };
+
+  pc.onconnectionstatechange = () => {
+    if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+      els.peerStatus.textContent = 'bağlantı koptu';
     }
   };
 
@@ -135,45 +140,56 @@ async function embedOfferInQR() {
   const data = JSON.stringify(payload);
   els.peerStatus.textContent = 'QR hazır – mobil cihazla okutun';
   els.status.textContent = 'Bağlantı bekleniyor…';
-  await QRCode.toCanvas(els.qrCanvas, data, { width: 260, margin: 1 });
-  // Answer QR'ını okumak için kamerayı aç
+  await QRCode.toCanvas(els.qrCanvas, data, { width: 280, margin: 1 });
   startAnswerScanner();
 }
 
 /* ---------- 2) Answer QR'ını kamera ile oku ---------- */
-let scanStream = null;
-let scanInterval = null;
-
 async function startAnswerScanner() {
   try {
-    scanStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+    scanStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'environment' },
+      audio: false
+    });
   } catch (e) {
     els.status.textContent = 'Kamera açılamadı: ' + e.message;
     return;
   }
-  const video = document.createElement('video');
-  video.srcObject = scanStream;
-  video.setAttribute('playsinline', '');
-  video.muted = true;
-  await video.play();
+  els.scanVideo.srcObject = scanStream;
+  els.scanVideo.classList.remove('hidden');
+  try { await els.scanVideo.play(); } catch {}
 
   const canvas = document.createElement('canvas');
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
   els.status.textContent = 'Mobil cihazdaki answer QR kodunu kameraya gösterin…';
 
-  scanInterval = setInterval(async () => {
-    if (video.readyState < 2) return;
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    ctx.drawImage(video, 0, 0);
-    const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    const code = jsQR(img.data, img.width, img.height);
-    if (code && code.data) {
-      clearInterval(scanInterval);
-      scanStream.getTracks().forEach(t => t.stop());
-      await acceptAnswer(code.data);
+  const tick = () => {
+    if (!scanStream) return;
+    if (els.scanVideo.readyState >= 2) {
+      canvas.width = els.scanVideo.videoWidth;
+      canvas.height = els.scanVideo.videoHeight;
+      ctx.drawImage(els.scanVideo, 0, 0, canvas.width, canvas.height);
+      const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const code = jsQR(img.data, img.width, img.height);
+      if (code && code.data) {
+        stopScanner();
+        acceptAnswer(code.data);
+        return;
+      }
     }
-  }, 300);
+    scanRafId = requestAnimationFrame(tick);
+  };
+  tick();
+}
+
+function stopScanner() {
+  if (scanRafId) cancelAnimationFrame(scanRafId);
+  scanRafId = null;
+  if (scanStream) {
+    scanStream.getTracks().forEach(t => t.stop());
+    scanStream = null;
+  }
+  els.scanVideo.classList.add('hidden');
 }
 
 async function acceptAnswer(raw) {
@@ -182,18 +198,23 @@ async function acceptAnswer(raw) {
   if (payload.t !== 'answer') return;
 
   els.peerStatus.textContent = 'Answer alındı, bağlantı kuruluyor…';
-  await pc.setRemoteDescription({ type: 'answer', sdp: payload.sdp });
-  for (const c of payload.cand || []) {
-    try { await pc.addIceCandidate(c); } catch {}
+  try {
+    await pc.setRemoteDescription({ type: 'answer', sdp: payload.sdp });
+    for (const c of payload.cand || []) {
+      try { await pc.addIceCandidate(c); } catch {}
+    }
+  } catch (e) {
+    els.peerStatus.textContent = 'Answer hatası: ' + e.message;
   }
 }
 
-/* ---------- 3) DataChannel olayları ---------- */
+/* ---------- 3) DataChannel ---------- */
 function setupDataChannel(channel) {
   channel.binaryType = 'arraybuffer';
 
   channel.onopen = () => {
     els.status.textContent = '✅ Bağlantı kuruldu';
+    els.peerStatus.textContent = 'bağlı';
     els.connectView.classList.add('hidden');
     els.chatView.classList.remove('hidden');
     els.sendBtn.disabled = false;
@@ -205,12 +226,15 @@ function setupDataChannel(channel) {
     addSystem('Bağlantı kapandı.');
   };
 
+  channel.onerror = (e) => {
+    addSystem('DataChannel hatası: ' + (e.message || 'bilinmeyen'));
+  };
+
   channel.onmessage = (e) => handleIncoming(e.data);
 }
 
 /* ---------- 4) Gelen veri ---------- */
 function handleIncoming(data) {
-  // Metin (JSON) mesajı
   if (typeof data === 'string') {
     let obj;
     try { obj = JSON.parse(data); } catch { return; }
@@ -224,7 +248,6 @@ function handleIncoming(data) {
     }
     return;
   }
-  // Binary chunk
   if (data instanceof ArrayBuffer && incomingFile) {
     incomingFile.chunks.push(data);
     incomingFile.received += data.byteLength;
@@ -251,11 +274,10 @@ function sendText() {
   els.msgInput.value = '';
 }
 
-/* ---------- 6) Dosya gönder (chunking) ---------- */
+/* ---------- 6) Dosya gönder ---------- */
 async function sendFile(file) {
   if (!dc || dc.readyState !== 'open') return;
 
-  // Meta
   dc.send(JSON.stringify({
     k: 'file-meta',
     name: file.name,
@@ -268,29 +290,31 @@ async function sendFile(file) {
   showProgress(`Gönderiliyor: ${file.name}`, 0);
   addMsg(`📤 ${file.name} gönderiliyor…`, 'me');
 
-  // DataChannel buffer'ı dolmasın diye bekle
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    for (let off = 0; off < value.length; off += CHUNK_SIZE) {
-      const chunk = value.slice(off, off + CHUNK_SIZE);
-      // buffer backpressure
-      while (dc.bufferedAmount > 8 * 1024 * 1024) {
-        await new Promise(r => setTimeout(r, 30));
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      for (let off = 0; off < value.length; off += CHUNK_SIZE) {
+        const chunk = value.slice(off, off + CHUNK_SIZE);
+        while (dc.bufferedAmount > MAX_BUFFERED) {
+          await new Promise(r => setTimeout(r, 30));
+        }
+        dc.send(chunk);
+        sent += chunk.byteLength;
+        const pct = Math.min(100, Math.round((sent / file.size) * 100));
+        showProgress(`Gönderiliyor: ${file.name}`, pct);
       }
-      dc.send(chunk);
-      sent += chunk.byteLength;
-      const pct = Math.min(100, Math.round((sent / file.size) * 100));
-      showProgress(`Gönderiliyor: ${file.name}`, pct);
     }
+    dc.send(JSON.stringify({ k: 'file-end' }));
+    hideProgress();
+    addFileMessage(file, file.name, file.type);
+  } catch (err) {
+    hideProgress();
+    addSystem('Dosya gönderme hatası: ' + err.message);
   }
-  dc.send(JSON.stringify({ k: 'file-end' }));
-  hideProgress();
-  // kendi tarafımızda ön izleme
-  addFileMessage(file, file.name, file.type);
 }
 
-/* ---------- 7) UI yardımcıları ---------- */
+/* ---------- 7) UI ---------- */
 function addMsg(text, who) {
   const div = document.createElement('div');
   div.className = 'msg ' + who;
@@ -333,7 +357,7 @@ function addFileMessage(blobOrFile, name, type) {
 }
 function showProgress(label, pct) {
   els.progressWrap.classList.remove('hidden');
-  els.progressLabel.textContent = label;
+  els.progressLabel.textContent = label + ' – %' + pct;
   els.progress.value = pct;
 }
 function hideProgress() {
@@ -352,12 +376,9 @@ els.fileInput.addEventListener('change', e => {
 /* Başlat */
 createRoom();
 
-/* Service Worker */
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('sw.js').catch(()=>{});
 }
 </script>
-<!-- jsQR: QR okuma (kamera) -->
-<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
 </body>
 </html>
