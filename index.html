@@ -8,30 +8,26 @@
   <meta name="theme-color" content="#2563eb" />
   <link rel="icon" href="icon-192.png" />
   <link rel="stylesheet" href="style.css" />
-  <!-- Mevcut <head> içine, qrcode.min.js'den ÖNCE ekleyin: -->
-  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
 </head>
 <body data-role="desktop">
   <header class="app-header">
-    <h1>🔗 P2P Transfer — Web Arayüzü</h1>
-    <span id="status" class="badge badge-wait">Bağlantı bekleniyor…</span>
+    <h1>🔗 P2P Transfer — Web</h1>
+    <span id="status" class="badge badge-wait">Başlatılıyor…</span>
   </header>
 
-  <!-- QR Ekranı -->
   <section id="qrSection" class="qr-section">
-    <p class="hint">Telefonunuzdan <strong>Mobil Arayüzü</strong> açın ve aşağıdaki QR kodu okutun.</p>
+    <p class="hint">Telefonunuzdan <b>Mobil Arayüzü</b> açın ve aşağıdaki QR kodu okutun.</p>
     <div id="qrcode" class="qr-box"></div>
-    <p class="tiny">Oturum kimliği: <code id="peerIdLabel">—</code></p>
-    <p class="tiny">Bu QR kod yalnızca bu oturum için geçerlidir ve sunucuya gönderilmez.</p>
+    <p class="tiny">Oturum: <code id="peerIdLabel">—</code></p>
+    <p class="tiny">QR yalnızca bu oturum için geçerlidir; içerik sunucuya gönderilmez.</p>
   </section>
 
-  <!-- Sohbet Ekranı -->
   <section id="chatSection" class="chat-section hidden">
     <div id="chatLog" class="chat-log"></div>
 
     <div id="progressArea" class="progress-area hidden">
       <div class="progress-row">
-        <span id="progressLabel">Dosya aktarılıyor…</span>
+        <span id="progressLabel">Aktarılıyor…</span>
         <span id="progressPct">0%</span>
       </div>
       <progress id="progressBar" value="0" max="100"></progress>
@@ -47,11 +43,12 @@
         📎 Dosya Seç
         <input type="file" id="fileInput" hidden />
       </label>
-      <span class="tiny">Her tür dosya (foto, video, pdf, zip…) desteklenir.</span>
+      <span class="tiny">Foto, video, ses, pdf, zip… her tür desteklenir.</span>
     </div>
   </section>
 
-  <!-- QR Kütüphanesi (CDN) -->
+  <!-- Kütüphaneler -->
+  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
   <script src="app.js"></script>
 </body>
