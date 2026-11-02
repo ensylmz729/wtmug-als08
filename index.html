@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>P2P Transfer - Web</title>
+  <link rel="manifest" href="./manifest.json">
+  <script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
+  <style>
+    body { font-family: sans-serif; max-width: 800px; margin: 2rem auto; padding: 0 1rem; }
+    #qr-container { margin: 1rem 0; }
+    #chat-area { display: none; }
+    #messages { border: 1px solid #ccc; height: 300px; overflow-y: auto; padding: 0.5rem; margin: 1rem 0; }
+    .msg { margin: 0.3rem 0; padding: 0.4rem 0.8rem; border-radius: 8px; max-width: 80%; word-break: break-word; }
+    .msg.sent { background: #d1e7ff; margin-left: auto; text-align: right; }
+    .msg.received { background: #f0f0f0; }
+    #connection-status { font-weight: bold; color: #555; }
+    input[type="text"] { width: 70%; padding: 0.5rem; }
+    button { padding: 0.5rem 1rem; margin: 0.2rem; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <h1>📤 Web Arayüzü (Bilgisayar)</h1>
+  <p>Durum: <span id="connection-status">QR kod oluşturuluyor...</span></p>
+
+  <div id="qr-container"></div>
+  <p id="qr-hint" style="font-size: 0.9em; color: #666;">Telefonunuzdan <strong>mobile.html</strong> sayfasını açıp bu QR kodu okutun.</p>
+
+  <div id="chat-area">
+    <div id="messages"></div>
+    <div>
+      <input type="text" id="text-input" placeholder="Mesaj yazın...">
+      <button onclick="sendText(document.getElementById('text-input').value); document.getElementById('text-input').value='';">Gönder</button>
+      <br>
+      <label>Dosya Gönder: <input type="file" id="file-input"></label>
+      <button onclick="const f=document.getElementById('file-input').files[0]; if(f) sendFile(f);">Dosyayı Gönder</button>
+      <br>
+      <progress id="send-progress" value="0" max="100"></progress> Gönderim
+      <br>
+      <progress id="receive-progress" value="0" max="100"></progress> Alım
+    </div>
+  </div>
+
+  <script src="./app.js"></script>
+  <script>
+    (async () => {
+      // Web arayüzü her zaman "offerer" (teklif eden) taraftır
+      isOfferer = true;
+      await createPeerConnection();
+
+      // DataChannel oluştur
+      dataChannel = pc.createDataChannel('fileTransfer');
+      setupDataChannel();
+
+      // Teklif oluştur
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+
+      // ICE adaylarının toplanmasını bekle
+      await new Promise(resolve => {
+        if (pc.iceGatheringState === 'complete') resolve();
+        else pc.onicegatheringstatechange = () => {
+          if (pc.iceGatheringState === 'complete') resolve();
+        };
+        setTimeout(resolve, 3000); // max 3 sn bekle
+      });
+
+      // QR koda SDP'yi koy (çok uzun olabilir; gerçek uygulamada sıkıştırma gerekir)
+      // Basitlik için sadece offer'ı JSON olarak veriyoruz. Gerçekte çok uzun olabilir.
+      const payload = JSON.stringify({
+        type: 'offer',
+        sdp: pc.localDescription.sdp
+      });
+
+      // QR kod çok büyük olacağı için kullanıcıya metin olarak da göster
+      showQRCode(payload);
+      console.log('Offer SDP:', pc.localDescription.sdp);
+
+      // Mobil taraftan gelecek "answer" için manuel giriş alanı
+      const answerArea = document.createElement('div');
+      answerArea.innerHTML = `
+        <hr>
+        <p><strong>Mobil taraftaki "Cevap" metnini buraya yapıştırın:</strong></p>
+        <textarea id="answer-input" rows="4" style="width:100%"></textarea>
+        <button id="accept-answer">Cevabı Kabul Et ve Bağlan</button>
+      `;
+      document.body.appendChild(answerArea);
+
+      document.getElementById('accept-answer').onclick = async () => {
+        const answerSdp = document.getElementById('answer-input').value.trim();
+        if (!answerSdp) return alert('Cevap metni boş!');
+        await pc.setRemoteDescription({ type: 'answer', sdp: answerSdp });
+        console.log('Remote description set.');
+      };
+    })();
+  </script>
+</body>
+</html>
