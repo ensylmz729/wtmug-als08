@@ -77,23 +77,14 @@
 </main>
 
 <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
+<script src="app.js"></script>
 <script>
 /* ============================================================
-   P2P WebRTC – Web tarafı (KAMERASIZ)
-   Akış:
-   1) Web offer + ICE üretir → QR olarak gösterir (kamera yok)
-   2) Telefon QR'ı okur, answer + ICE üretir
-   3) Telefon answer'ı KISA KOD olarak gösterir
-   4) Kullanıcı kodu Web'e yapıştırır → bağlantı kurulur
+   Web Arayüzü – app.js kullanır
+   Bilgisayarda kamera YOK.
+   1) offer üret → QR göster
+   2) kullanıcı cevap kodunu yapıştırır → bağlantı kurulur
    ============================================================ */
-
-const ICE_SERVERS = [
-  { urls: 'stun:stun.l.google.com:19302' },
-  { urls: 'stun:stun1.l.google.com:19302' }
-];
-
-const CHUNK_SIZE = 16 * 1024;
-const MAX_BUFFERED = 8 * 1024 * 1024;
 
 const els = {
   connectView: document.getElementById('connectView'),
@@ -112,51 +103,53 @@ const els = {
   progressLabel: document.getElementById('progressLabel'),
 };
 
-let pc = null;
-let dc = null;
-let pendingCandidates = [];
-let incomingFile = null;
-let answerSubmitted = false;
-
-/* ---------- 1) Oda oluştur → QR ---------- */
-async function createRoom() {
-  pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
-  dc = pc.createDataChannel('data', { ordered: true });
-  setupDataChannel(dc);
-
-  pc.onicecandidate = (e) => {
-    if (e.candidate) {
-      pendingCandidates.push(e.candidate.toJSON());
-    } else {
-      embedOfferInQR();
-    }
-  };
-
-  pc.onconnectionstatechange = () => {
-    els.peerStatus.textContent = pc.connectionState;
-    if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+/* ---------- app.js için hooks ---------- */
+const hooks = {
+  onOpen() {
+    els.status.textContent = '✅ Bağlantı kuruldu';
+    els.peerStatus.textContent = 'bağlı';
+    els.connectView.classList.add('hidden');
+    els.chatView.classList.remove('hidden');
+    els.sendBtn.disabled = false;
+    addSystem('Bağlantı kuruldu.');
+  },
+  onClose() {
+    els.sendBtn.disabled = true;
+    addSystem('Bağlantı kapandı.');
+  },
+  onError(e) {
+    addSystem('Hata: ' + (e.message || 'bilinmeyen'));
+  },
+  onText(v) {
+    addMsg(v, 'them');
+  },
+  onFile(blob, name, type, mine) {
+    addFileMessage(blob, name, type, mine);
+  },
+  onProgress(label, pct) {
+    showProgress(label, pct);
+  },
+  onProgressHide() {
+    hideProgress();
+  },
+  onOfferReady(data) {
+    QRCode.toCanvas(els.qrCanvas, data, { width: 280, margin: 1 });
+    els.peerStatus.textContent = 'QR hazır – telefona okutun';
+    els.status.textContent = 'Bağlantı bekleniyor…';
+  },
+  onConnState(state) {
+    els.peerStatus.textContent = state;
+    if (state === 'failed' || state === 'disconnected') {
       els.status.textContent = 'bağlantı koptu';
     }
-  };
+  }
+};
 
-  const offer = await pc.createOffer();
-  await pc.setLocalDescription(offer);
-  els.peerStatus.textContent = 'ICE adayları toplanıyor…';
-}
+/* ---------- Oda oluştur ---------- */
+P2P.createOffer(hooks);
 
-async function embedOfferInQR() {
-  const payload = {
-    t: 'offer',
-    sdp: pc.localDescription.sdp,
-    cand: pendingCandidates,
-  };
-  const data = JSON.stringify(payload);
-  els.peerStatus.textContent = 'QR hazır – telefona okutun';
-  els.status.textContent = 'Bağlantı bekleniyor…';
-  await QRCode.toCanvas(els.qrCanvas, data, { width: 280, margin: 1 });
-}
-
-/* ---------- 2) Kullanıcı answer kodunu yapıştırır ---------- */
+/* ---------- Cevap kodunu uygula ---------- */
+let answerSubmitted = false;
 els.submitAnswerBtn.addEventListener('click', async () => {
   if (answerSubmitted) return;
   const raw = els.answerInput.value.trim();
@@ -165,143 +158,39 @@ els.submitAnswerBtn.addEventListener('click', async () => {
   els.submitAnswerBtn.disabled = true;
   els.peerStatus.textContent = 'cevap işleniyor…';
 
-  let payload;
   try {
-    payload = JSON.parse(raw);
-  } catch (e) {
-    els.peerStatus.textContent = 'kod okunamadı (JSON hatası)';
-    answerSubmitted = false;
-    els.submitAnswerBtn.disabled = false;
-    return;
-  }
-
-  if (payload.t !== 'answer') {
-    els.peerStatus.textContent = 'bu bir "answer" kodu değil';
-    answerSubmitted = false;
-    els.submitAnswerBtn.disabled = false;
-    return;
-  }
-
-  try {
-    await pc.setRemoteDescription({ type: 'answer', sdp: payload.sdp });
-    for (const c of payload.cand || []) {
-      try { await pc.addIceCandidate(c); } catch {}
-    }
+    await P2P.applyAnswer(raw);
     els.peerStatus.textContent = 'cevap alındı, bağlantı kuruluyor…';
   } catch (e) {
-    els.peerStatus.textContent = 'answer hatası: ' + e.message;
+    els.peerStatus.textContent = 'hata: ' + e.message;
     answerSubmitted = false;
     els.submitAnswerBtn.disabled = false;
   }
 });
 
-/* ---------- 3) DataChannel ---------- */
-function setupDataChannel(channel) {
-  channel.binaryType = 'arraybuffer';
-
-  channel.onopen = () => {
-    els.status.textContent = '✅ Bağlantı kuruldu';
-    els.peerStatus.textContent = 'bağlı';
-    els.connectView.classList.add('hidden');
-    els.chatView.classList.remove('hidden');
-    els.sendBtn.disabled = false;
-    addSystem('Bağlantı kuruldu.');
-  };
-
-  channel.onclose = () => {
-    els.sendBtn.disabled = true;
-    addSystem('Bağlantı kapandı.');
-  };
-
-  channel.onerror = (e) => {
-    addSystem('DataChannel hatası: ' + (e.message || 'bilinmeyen'));
-  };
-
-  channel.onmessage = (e) => handleIncoming(e.data);
-}
-
-/* ---------- 4) Gelen veri ---------- */
-function handleIncoming(data) {
-  if (typeof data === 'string') {
-    let obj;
-    try { obj = JSON.parse(data); } catch { return; }
-    if (obj.k === 'text') {
-      addMsg(obj.v, 'them');
-    } else if (obj.k === 'file-meta') {
-      incomingFile = { name: obj.name, type: obj.type, size: obj.size, chunks: [], received: 0 };
-      showProgress(`Alınıyor: ${obj.name}`, 0);
-    } else if (obj.k === 'file-end') {
-      finishIncomingFile();
-    }
-    return;
-  }
-  if (data instanceof ArrayBuffer && incomingFile) {
-    incomingFile.chunks.push(data);
-    incomingFile.received += data.byteLength;
-    const pct = Math.min(100, Math.round((incomingFile.received / incomingFile.size) * 100));
-    showProgress(`Alınıyor: ${incomingFile.name}`, pct);
-    if (pct >= 100) finishIncomingFile();
-  }
-}
-
-function finishIncomingFile() {
-  if (!incomingFile) return;
-  const blob = new Blob(incomingFile.chunks, { type: incomingFile.type || 'application/octet-stream' });
-  addFileMessage(blob, incomingFile.name, incomingFile.type);
-  hideProgress();
-  incomingFile = null;
-}
-
-/* ---------- 5) Metin gönder ---------- */
-function sendText() {
+/* ---------- Mesaj gönder ---------- */
+els.sendBtn.addEventListener('click', () => {
   const v = els.msgInput.value.trim();
-  if (!v || !dc || dc.readyState !== 'open') return;
-  dc.send(JSON.stringify({ k: 'text', v }));
-  addMsg(v, 'me');
-  els.msgInput.value = '';
-}
-
-/* ---------- 6) Dosya gönder ---------- */
-async function sendFile(file) {
-  if (!dc || dc.readyState !== 'open') return;
-
-  dc.send(JSON.stringify({
-    k: 'file-meta',
-    name: file.name,
-    type: file.type,
-    size: file.size
-  }));
-
-  const reader = file.stream().getReader();
-  let sent = 0;
-  showProgress(`Gönderiliyor: ${file.name}`, 0);
-  addMsg(`📤 ${file.name} gönderiliyor…`, 'me');
-
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      for (let off = 0; off < value.length; off += CHUNK_SIZE) {
-        const chunk = value.slice(off, off + CHUNK_SIZE);
-        while (dc.bufferedAmount > MAX_BUFFERED) {
-          await new Promise(r => setTimeout(r, 30));
-        }
-        dc.send(chunk);
-        sent += chunk.byteLength;
-        const pct = Math.min(100, Math.round((sent / file.size) * 100));
-        showProgress(`Gönderiliyor: ${file.name}`, pct);
-      }
-    }
-    dc.send(JSON.stringify({ k: 'file-end' }));
-    hideProgress();
-    addFileMessage(file, file.name, file.type);
-  } catch (err) {
-    hideProgress();
-    addSystem('Dosya gönderme hatası: ' + err.message);
+  if (P2P.sendText(v)) {
+    addMsg(v, 'me');
+    els.msgInput.value = '';
   }
-}
+});
+els.msgInput.addEventListener('keydown', e => {
+  if (e.key === 'Enter') els.sendBtn.click();
+});
 
-/* ---------- 7) UI ---------- */
+/* ---------- Dosya gönder ---------- */
+els.fileInput.addEventListener('change', e => {
+  const f = e.target.files[0];
+  if (f) {
+    addMsg(`📤 ${f.name} gönderiliyor…`, 'me');
+    P2P.sendFile(f);
+  }
+  e.target.value = '';
+});
+
+/* ---------- UI yardımcıları ---------- */
 function addMsg(text, who) {
   const div = document.createElement('div');
   div.className = 'msg ' + who;
@@ -318,10 +207,10 @@ function addSystem(text) {
   els.chat.appendChild(div);
   els.chat.scrollTop = els.chat.scrollHeight;
 }
-function addFileMessage(blobOrFile, name, type) {
+function addFileMessage(blob, name, type, mine) {
   const div = document.createElement('div');
-  div.className = 'msg ' + (blobOrFile instanceof File ? 'me' : 'them');
-  const url = URL.createObjectURL(blobOrFile);
+  div.className = 'msg ' + (mine ? 'me' : 'them');
+  const url = URL.createObjectURL(blob);
   if (type && type.startsWith('image/')) {
     const img = document.createElement('img');
     img.src = url;
@@ -351,20 +240,9 @@ function hideProgress() {
   els.progressWrap.classList.add('hidden');
 }
 
-/* ---------- 8) Olaylar ---------- */
-els.sendBtn.addEventListener('click', sendText);
-els.msgInput.addEventListener('keydown', e => { if (e.key === 'Enter') sendText(); });
-els.fileInput.addEventListener('change', e => {
-  const f = e.target.files[0];
-  if (f) sendFile(f);
-  e.target.value = '';
-});
-
-/* Başlat */
-createRoom();
-
+/* ---------- Service Worker ---------- */
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('sw.js').catch(()=>{});
+  navigator.serviceWorker.register('sw.js').catch(() => {});
 }
 </script>
 </body>
