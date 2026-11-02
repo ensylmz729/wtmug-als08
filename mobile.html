@@ -1,105 +1,57 @@
 <!DOCTYPE html>
 <html lang="tr">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>P2P Transfer - Mobil</title>
-  <link rel="manifest" href="./manifest.json">
-  <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
-  <style>
-    body { font-family: sans-serif; padding: 0.5rem; }
-    #scanner-container { margin: 1rem 0; }
-    #chat-area { display: none; }
-    #messages { border: 1px solid #ccc; height: 250px; overflow-y: auto; padding: 0.5rem; margin: 1rem 0; }
-    .msg { margin: 0.3rem 0; padding: 0.4rem 0.8rem; border-radius: 8px; max-width: 85%; word-break: break-word; }
-    .msg.sent { background: #d1e7ff; margin-left: auto; text-align: right; }
-    .msg.received { background: #f0f0f0; }
-    #connection-status { font-weight: bold; }
-    input[type="text"] { width: 65%; padding: 0.5rem; }
-    button { padding: 0.5rem 1rem; }
-  </style>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+  <title>P2P Transfer — Mobil</title>
+  <link rel="manifest" href="manifest.json" />
+  <meta name="theme-color" content="#2563eb" />
+  <link rel="icon" href="icon-192.png" />
+  <link rel="stylesheet" href="style.css" />
 </head>
-<body>
-  <h1>📱 Mobil Arayüzü</h1>
-  <p>Durum: <span id="connection-status">QR kod okutun</span></p>
+<body data-role="mobile">
+  <header class="app-header">
+    <h1>📱 P2P Transfer — Mobil</h1>
+    <span id="status" class="badge badge-wait">QR okutun</span>
+  </header>
 
-  <div id="scanner-container">
-    <div id="qr-reader" style="width:100%"></div>
-  </div>
-
-  <div id="chat-area">
-    <div id="messages"></div>
-    <div>
-      <input type="text" id="text-input" placeholder="Mesaj...">
-      <button onclick="sendText(document.getElementById('text-input').value); document.getElementById('text-input').value='';">Gönder</button>
-      <br><br>
-      <label>Dosya: <input type="file" id="file-input"></label>
-      <button onclick="const f=document.getElementById('file-input').files[0]; if(f) sendFile(f);">Gönder</button>
-      <br>
-      <progress id="send-progress" value="0" max="100"></progress> Gönderim
-      <br>
-      <progress id="receive-progress" value="0" max="100"></progress> Alım
+  <!-- QR Tarama -->
+  <section id="scanSection" class="scan-section">
+    <p class="hint">Bilgisayar ekranındaki QR kodu kameraya gösterin.</p>
+    <div class="video-wrap">
+      <video id="scanner" playsinline muted></video>
+      <div class="scan-frame"></div>
     </div>
-  </div>
+    <p class="tiny">Kamera yalnızca QR okumak için kullanılır, hiçbir görüntü kaydedilmez.</p>
+  </section>
 
-  <script src="./app.js"></script>
-  <script>
-    // Mobil taraf her zaman "answerer" (cevaplayan) taraftır
-    isOfferer = false;
+  <!-- Sohbet Ekranı -->
+  <section id="chatSection" class="chat-section hidden">
+    <div id="chatLog" class="chat-log"></div>
 
-    // QR kod okuma
-    const scanner = new Html5QrcodeScanner("qr-reader", { fps: 10, qrbox: 250 });
+    <div id="progressArea" class="progress-area hidden">
+      <div class="progress-row">
+        <span id="progressLabel">Dosya aktarılıyor…</span>
+        <span id="progressPct">0%</span>
+      </div>
+      <progress id="progressBar" value="0" max="100"></progress>
+    </div>
 
-    scanner.render(async (decodedText) => {
-      // QR koddan gelen offer'ı işle
-      try {
-        const data = JSON.parse(decodedText);
-        if (data.type !== 'offer') return;
+    <form id="msgForm" class="input-row">
+      <input type="text" id="msgInput" placeholder="Mesaj yazın…" autocomplete="off" />
+      <button type="submit">Gönder</button>
+    </form>
 
-        scanner.clear(); // okumayı durdur
-        document.getElementById('scanner-container').style.display = 'none';
-        document.getElementById('connection-status').textContent = 'Bağlanıyor...';
+    <div class="file-row">
+      <label class="file-btn">
+        📎 Dosya Seç
+        <input type="file" id="fileInput" hidden />
+      </label>
+    </div>
+  </section>
 
-        await createPeerConnection();
-
-        // Offer'ı set et
-        await pc.setRemoteDescription({ type: 'offer', sdp: data.sdp });
-
-        // Cevap oluştur
-        const answer = await pc.createAnswer();
-        await pc.setLocalDescription(answer);
-
-        // ICE toplanmasını bekle
-        await new Promise(resolve => {
-          if (pc.iceGatheringState === 'complete') resolve();
-          else pc.onicegatheringstatechange = () => {
-            if (pc.iceGatheringState === 'complete') resolve();
-          };
-          setTimeout(resolve, 3000);
-        });
-
-        // Cevabı kullanıcıya göster (bilgisayardaki alana yapıştırılacak)
-        const answerSdp = pc.localDescription.sdp;
-        const answerDiv = document.createElement('div');
-        answerDiv.innerHTML = `
-          <hr>
-          <p><strong>Bu cevabı bilgisayardaki alana yapıştırın:</strong></p>
-          <textarea rows="6" style="width:100%" readonly>${answerSdp}</textarea>
-          <button onclick="navigator.clipboard.writeText(this.previousElementSibling.value); this.textContent='Kopyalandı!'">Kopyala</button>
-        `;
-        document.body.appendChild(answerDiv);
-
-        // DataChannel zaten pc.ondatachannel ile yakalanacak
-        pc.ondatachannel = (event) => {
-          dataChannel = event.channel;
-          setupDataChannel();
-        };
-
-      } catch (e) {
-        console.error('QR okuma hatası:', e);
-        alert('Geçersiz QR kod: ' + e.message);
-      }
-    }, (err) => { /* hata callback - sessiz */ });
-  </script>
+  <!-- jsQR (QR okuma kütüphanesi) -->
+  <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
+  <script src="app.js"></script>
 </body>
 </html>
