@@ -1,56 +1,351 @@
 <!DOCTYPE html>
 <html lang="tr">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-  <title>P2P Transfer — Mobil</title>
-  <link rel="manifest" href="manifest.json" />
-  <meta name="theme-color" content="#2563eb" />
-  <link rel="icon" href="icon-192.png" />
-  <link rel="stylesheet" href="style.css" />
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<title>P2P Transfer – Mobil</title>
+<link rel="manifest" href="manifest.json" />
+<meta name="theme-color" content="#0f172a" />
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, sans-serif; margin:0; background:#0f172a; color:#e2e8f0; padding-bottom: env(safe-area-inset-bottom); }
+  header { padding: 14px 18px; background:#1e293b; border-bottom:1px solid #334155; position:sticky; top:0; z-index:5; }
+  h1 { margin:0; font-size:18px; }
+  main { padding: 16px; }
+  .card { background:#1e293b; border:1px solid #334155; border-radius:12px; padding:16px; margin-bottom:16px; }
+  #reader { width:100%; border-radius:8px; overflow:hidden; background:#000; }
+  #status { font-weight:600; margin-top:8px; }
+  .chat { display:flex; flex-direction:column; gap:8px; height:50vh; overflow-y:auto; padding:10px; background:#0b1220; border-radius:8px; border:1px solid #334155; }
+  .msg { max-width:80%; padding:8px 12px; border-radius:10px; word-wrap:break-word; font-size:14px; }
+  .msg.me { align-self:flex-end; background:#2563eb; }
+  .msg.them { align-self:flex-start; background:#334155; }
+  .msg img, .msg video { max-width:100%; border-radius:6px; display:block; }
+  .msg a.dl { color:#93c5fd; }
+  .row { display:flex; gap:8px; margin-top:12px; }
+  input[type=text] { flex:1; padding:12px; border-radius:8px; border:1px solid #334155; background:#0b1220; color:#e2e8f0; font-size:16px; }
+  button { padding:12px 16px; border-radius:8px; border:none; background:#2563eb; color:#fff; cursor:pointer; font-weight:600; font-size:15px; }
+  button:disabled { opacity:.5; }
+  label.file-btn { display:inline-flex; align-items:center; justify-content:center; padding:12px 16px; border-radius:8px; background:#16a34a; color:#fff; cursor:pointer; font-weight:600; font-size:15px; }
+  label.file-btn input { display:none; }
+  progress { width:100%; height:12px; }
+  .hidden { display:none; }
+  .hint { font-size:13px; color:#94a3b8; }
+  #answerWrap { text-align:center; }
+  #answerCanvas { background:#fff; padding:10px; border-radius:8px; }
+</style>
 </head>
-<body data-role="mobile">
-  <header class="app-header">
-    <h1>📱 P2P Transfer — Mobil</h1>
-    <span id="status" class="badge badge-wait">Kamera açılıyor…</span>
-  </header>
-
-  <section id="scanSection" class="scan-section">
-    <p class="hint">Bilgisayar ekranındaki QR kodu kameraya gösterin.</p>
-    <div class="video-wrap">
-      <!-- ÖNEMLİ: playsinline + muted + autoplay mobilde siyah ekranı engeller -->
-      <video id="scanner" playsinline webkit-playsinline muted autoplay></video>
-      <div class="scan-frame"></div>
-    </div>
-    <p class="tiny">Kamera yalnızca QR okumak için kullanılır; hiçbir görüntü kaydedilmez.</p>
+<body>
+<header><h1>📱 P2P Transfer — Mobil Arayüzü</h1></header>
+<main>
+  <!-- QR okuma ekranı -->
+  <section id="scanView" class="card">
+    <p>Bilgisayar ekranındaki QR kodu kameraya gösterin.</p>
+    <div id="reader"></div>
+    <div id="status">Kamera başlatılıyor…</div>
   </section>
 
-  <section id="chatSection" class="chat-section hidden">
-    <div id="chatLog" class="chat-log"></div>
+  <!-- Answer QR göster (web'in okuması için) -->
+  <section id="answerView" class="card hidden">
+    <p>Bu QR kodu bilgisayarın kamerasına gösterin:</p>
+    <div id="answerWrap">
+      <canvas id="answerCanvas"></canvas>
+    </div>
+    <div id="answerStatus" class="hint" style="margin-top:10px;">Cevap hazırlanıyor…</div>
+  </section>
 
-    <div id="progressArea" class="progress-area hidden">
-      <div class="progress-row">
-        <span id="progressLabel">Aktarılıyor…</span>
-        <span id="progressPct">0%</span>
+  <!-- Sohbet -->
+  <section id="chatView" class="hidden">
+    <div class="card">
+      <div id="chat" class="chat"></div>
+      <div class="row">
+        <input id="msgInput" type="text" placeholder="Mesaj…" />
+        <button id="sendBtn" disabled>Gönder</button>
       </div>
-      <progress id="progressBar" value="0" max="100"></progress>
-    </div>
-
-    <form id="msgForm" class="input-row">
-      <input type="text" id="msgInput" placeholder="Mesaj yazın…" autocomplete="off" />
-      <button type="submit">Gönder</button>
-    </form>
-
-    <div class="file-row">
-      <label class="file-btn">
-        📎 Dosya Seç
-        <input type="file" id="fileInput" hidden />
-      </label>
+      <div class="row">
+        <label class="file-btn" style="flex:1;">📎 Dosya Gönder
+          <input id="fileInput" type="file" />
+        </label>
+      </div>
+      <div id="progressWrap" class="hidden" style="margin-top:12px;">
+        <div id="progressLabel" class="hint"></div>
+        <progress id="progress" value="0" max="100"></progress>
+      </div>
     </div>
   </section>
+</main>
 
-  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
-  <script src="app.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
+<script>
+/* ============================================================
+   P2P WebRTC – Mobil tarafı
+   - Bilgisayarın QR'ındaki offer'ı okur.
+   - Answer + ICE adaylarını oluşturup QR olarak gösterir.
+   - Bilgisayar bu QR'ı kamerasıyla okur → bağlantı kurulur.
+   ============================================================ */
+
+const ICE_SERVERS = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun1.l.google.com:19302' }
+];
+const CHUNK_SIZE = 16 * 1024;
+
+const els = {
+  scanView: document.getElementById('scanView'),
+  answerView: document.getElementById('answerView'),
+  chatView: document.getElementById('chatView'),
+  reader: document.getElementById('reader'),
+  status: document.getElementById('status'),
+  answerCanvas: document.getElementById('answerCanvas'),
+  answerStatus: document.getElementById('answerStatus'),
+  chat: document.getElementById('chat'),
+  msgInput: document.getElementById('msgInput'),
+  sendBtn: document.getElementById('sendBtn'),
+  fileInput: document.getElementById('fileInput'),
+  progressWrap: document.getElementById('progressWrap'),
+  progress: document.getElementById('progress'),
+  progressLabel: document.getElementById('progressLabel'),
+};
+
+let pc = null;
+let dc = null;
+let pendingCandidates = [];
+let incomingFile = null;
+let scanning = true;
+
+/* ---------- 1) Kamera ile offer QR'ını oku ---------- */
+async function startScan() {
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+  } catch (e) {
+    els.status.textContent = 'Kamera hatası: ' + e.message;
+    return;
+  }
+  const video = document.createElement('video');
+  video.srcObject = stream;
+  video.setAttribute('playsinline', '');
+  video.muted = true;
+  await video.play();
+  els.reader.appendChild(video);
+
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  els.status.textContent = 'QR aranıyor…';
+
+  const tick = () => {
+    if (!scanning) return;
+    if (video.readyState >= 2) {
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      ctx.drawImage(video, 0, 0);
+      const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const code = jsQR(img.data, img.width, img.height);
+      if (code && code.data) {
+        scanning = false;
+        stream.getTracks().forEach(t => t.stop());
+        els.status.textContent = 'QR okundu, cevap hazırlanıyor…';
+        handleOfferQR(code.data);
+        return;
+      }
+    }
+    requestAnimationFrame(tick);
+  };
+  tick();
+}
+
+/* ---------- 2) Offer'ı işle, answer üret ---------- */
+async function handleOfferQR(raw) {
+  let payload;
+  try { payload = JSON.parse(raw); } catch { return; }
+  if (payload.t !== 'offer') return;
+
+  pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+  pendingCandidates = [];
+
+  pc.ondatachannel = (e) => {
+    dc = e.channel;
+    setupDataChannel(dc);
+  };
+
+  pc.onicecandidate = (e) => {
+    if (e.candidate) pendingCandidates.push(e.candidate.toJSON());
+  };
+
+  await pc.setRemoteDescription({ type: 'offer', sdp: payload.sdp });
+  for (const c of payload.cand || []) {
+    try { await pc.addIceCandidate(c); } catch {}
+  }
+
+  const answer = await pc.createAnswer();
+  await pc.setLocalDescription(answer);
+
+  // ICE toplama bitene kadar bekle
+  await new Promise(res => {
+    if (pc.iceGatheringState === 'complete') return res();
+    const check = () => {
+      if (pc.iceGatheringState === 'complete') {
+        pc.removeEventListener('icegatheringstatechange', check);
+        res();
+      }
+    };
+    pc.addEventListener('icegatheringstatechange', check);
+    setTimeout(res, 3000); // güvenlik
+  });
+
+  // Answer + adayları QR olarak göster
+  const answerPayload = {
+    t: 'answer',
+    sdp: pc.localDescription.sdp,
+    cand: pendingCandidates,
+  };
+  els.scanView.classList.add('hidden');
+  els.answerView.classList.remove('hidden');
+  await QRCode.toCanvas(els.answerCanvas, JSON.stringify(answerPayload), { width: 300, margin: 1 });
+  els.answerStatus.textContent = 'Bilgisayarın kamerasına gösterin…';
+}
+
+/* ---------- 3) DataChannel ---------- */
+function setupDataChannel(channel) {
+  channel.binaryType = 'arraybuffer';
+
+  channel.onopen = () => {
+    els.answerView.classList.add('hidden');
+    els.scanView.classList.add('hidden');
+    els.chatView.classList.remove('hidden');
+    els.sendBtn.disabled = false;
+    addSystem('Bağlantı kuruldu ✅');
+  };
+  channel.onclose = () => {
+    els.sendBtn.disabled = true;
+    addSystem('Bağlantı kapandı.');
+  };
+  channel.onmessage = (e) => handleIncoming(e.data);
+}
+
+/* ---------- 4) Gelen veri ---------- */
+function handleIncoming(data) {
+  if (typeof data === 'string') {
+    let obj;
+    try { obj = JSON.parse(data); } catch { return; }
+    if (obj.k === 'text') addMsg(obj.v, 'them');
+    else if (obj.k === 'file-meta') {
+      incomingFile = { name: obj.name, type: obj.type, size: obj.size, chunks: [], received: 0 };
+      showProgress(`Alınıyor: ${obj.name}`, 0);
+    } else if (obj.k === 'file-end') {
+      finishIncomingFile();
+    }
+    return;
+  }
+  if (data instanceof ArrayBuffer && incomingFile) {
+    incomingFile.chunks.push(data);
+    incomingFile.received += data.byteLength;
+    const pct = Math.min(100, Math.round((incomingFile.received / incomingFile.size) * 100));
+    showProgress(`Alınıyor: ${incomingFile.name}`, pct);
+    if (pct >= 100) finishIncomingFile();
+  }
+}
+
+function finishIncomingFile() {
+  if (!incomingFile) return;
+  const blob = new Blob(incomingFile.chunks, { type: incomingFile.type || 'application/octet-stream' });
+  addFileMessage(blob, incomingFile.name, incomingFile.type);
+  hideProgress();
+  incomingFile = null;
+}
+
+/* ---------- 5) Metin gönder ---------- */
+function sendText() {
+  const v = els.msgInput.value.trim();
+  if (!v || !dc || dc.readyState !== 'open') return;
+  dc.send(JSON.stringify({ k: 'text', v }));
+  addMsg(v, 'me');
+  els.msgInput.value = '';
+}
+
+/* ---------- 6) Dosya gönder ---------- */
+async function sendFile(file) {
+  if (!dc || dc.readyState !== 'open') return;
+  dc.send(JSON.stringify({ k: 'file-meta', name: file.name, type: file.type, size: file.size }));
+
+  const reader = file.stream().getReader();
+  let sent = 0;
+  showProgress(`Gönderiliyor: ${file.name}`, 0);
+  addMsg(`📤 ${file.name} gönderiliyor…`, 'me');
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    for (let off = 0; off < value.length; off += CHUNK_SIZE) {
+      const chunk = value.slice(off, off + CHUNK_SIZE);
+      while (dc.bufferedAmount > 8 * 1024 * 1024) {
+        await new Promise(r => setTimeout(r, 30));
+      }
+      dc.send(chunk);
+      sent += chunk.byteLength;
+      const pct = Math.min(100, Math.round((sent / file.size) * 100));
+      showProgress(`Gönderiliyor: ${file.name}`, pct);
+    }
+  }
+  dc.send(JSON.stringify({ k: 'file-end' }));
+  hideProgress();
+  addFileMessage(file, file.name, file.type);
+}
+
+/* ---------- 7) UI ---------- */
+function addMsg(text, who) {
+  const div = document.createElement('div');
+  div.className = 'msg ' + who;
+  div.textContent = text;
+  els.chat.appendChild(div);
+  els.chat.scrollTop = els.chat.scrollHeight;
+}
+function addSystem(text) {
+  const div = document.createElement('div');
+  div.className = 'msg them';
+  div.style.fontStyle = 'italic';
+  div.style.opacity = '.75';
+  div.textContent = text;
+  els.chat.appendChild(div);
+  els.chat.scrollTop = els.chat.scrollHeight;
+}
+function addFileMessage(blobOrFile, name, type) {
+  const div = document.createElement('div');
+  div.className = 'msg ' + (blobOrFile instanceof File ? 'me' : 'them');
+  const url = URL.createObjectURL(blobOrFile);
+  if (type && type.startsWith('image/')) {
+    const img = document.createElement('img'); img.src = url; div.appendChild(img);
+  } else if (type && type.startsWith('video/')) {
+    const vid = document.createElement('video'); vid.src = url; vid.controls = true; div.appendChild(vid);
+  } else {
+    const a = document.createElement('a');
+    a.href = url; a.download = name; a.textContent = '⬇ İndir: ' + name; a.className = 'dl';
+    div.appendChild(a);
+  }
+  els.chat.appendChild(div);
+  els.chat.scrollTop = els.chat.scrollHeight;
+}
+function showProgress(label, pct) {
+  els.progressWrap.classList.remove('hidden');
+  els.progressLabel.textContent = label;
+  els.progress.value = pct;
+}
+function hideProgress() { els.progressWrap.classList.add('hidden'); }
+
+/* ---------- 8) Olaylar & başlat ---------- */
+els.sendBtn.addEventListener('click', sendText);
+els.msgInput.addEventListener('keydown', e => { if (e.key === 'Enter') sendText(); });
+els.fileInput.addEventListener('change', e => {
+  const f = e.target.files[0];
+  if (f) sendFile(f);
+  e.target.value = '';
+});
+
+startScan();
+
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('sw.js').catch(()=>{});
+}
+</script>
 </body>
 </html>
